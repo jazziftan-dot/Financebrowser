@@ -15,158 +15,265 @@
 <body>
 <div id="app">
 
-  <!-- ── Übersicht ── -->
+  <!-- ══════════════════════════════════════════════════════════════
+       ÜBERSICHT
+  ══════════════════════════════════════════════════════════════ -->
   <div id="page-uebersicht" class="page active">
-    <div class="page-header">
-      <h1>Übersicht</h1>
-      <p>Deine finanzielle Lage auf einen Blick</p>
+
+    <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div><h1>Übersicht</h1><p>Deine Finanzen auf einen Blick</p></div>
+      <button class="btn btn-ghost btn-icon" onclick="openSettings()" style="margin-top:4px">⚙️</button>
     </div>
 
-    <!-- Balance -->
-    <div class="card balance-card" onclick="openBalanceModal()" style="cursor:pointer">
-      <div class="balance-label">Kontostand</div>
-      <div class="balance-amount" id="dash-balance">0 CHF</div>
-      <div class="balance-sub" id="dash-balance-sub">Monatliche Sparrate: –</div>
-      <div style="margin-top:10px;font-size:12px;color:rgba(255,255,255,.5)">Tippen zum Bearbeiten</div>
+    <!-- Nettovermögen -->
+    <div class="card networth-card" onclick="openAccountsModal()">
+      <div class="nw-label">Nettovermögen</div>
+      <div class="nw-amount" id="dash-networth">0 CHF</div>
+      <div class="nw-breakdown" id="dash-nw-breakdown">Vermögen: 0 · Schulden: 0</div>
+      <div class="nw-hint">Tippen um Konten zu verwalten</div>
     </div>
 
-    <!-- Stats grid -->
+    <!-- Monatliche Zahlen -->
     <div class="stat-row">
       <div class="stat-card">
-        <div class="lbl">Einkommen / Mt.</div>
+        <div class="lbl">Einkommen/Mt.</div>
         <div class="val green" id="dash-income">0</div>
       </div>
       <div class="stat-card">
-        <div class="lbl">Ausgaben / Mt.</div>
+        <div class="lbl">Ausgaben/Mt.</div>
         <div class="val red" id="dash-expenses">0</div>
       </div>
     </div>
     <div class="stat-row">
       <div class="stat-card">
-        <div class="lbl">Investitionen / Mt.</div>
+        <div class="lbl">Investiert/Mt.</div>
         <div class="val blue" id="dash-investments">0</div>
       </div>
       <div class="stat-card">
-        <div class="lbl">Frei / Mt.</div>
-        <div class="val green" id="dash-savings">0</div>
+        <div class="lbl">Frei/Mt.</div>
+        <div class="val" id="dash-savings">0</div>
       </div>
     </div>
 
-    <!-- Savings rate -->
+    <!-- Notfallfonds -->
     <div class="card">
-      <div class="card-title">Sparquote</div>
+      <div class="card-title">Notfallfonds</div>
+      <div id="dash-emergency">
+        <div style="font-size:13px;color:var(--text2)">Erfasse Konten und Ausgaben für die Berechnung.</div>
+      </div>
+    </div>
+
+    <!-- FIRE Mini -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="card-title" style="margin-bottom:0">🔥 FIRE-Fortschritt</div>
+        <button class="toggle-btn" onclick="navigate('ziele')">Details →</button>
+      </div>
+      <div id="dash-fire">
+        <div style="font-size:13px;color:var(--text2)">Erfasse Einkommen und Investitionen.</div>
+      </div>
+    </div>
+
+    <!-- Sparquote -->
+    <div class="card">
+      <div class="card-title">Sparquote (inkl. Investitionen)</div>
       <div class="rate-wrap">
-        <div class="rate-label">
-          <span>0%</span>
-          <span id="dash-rate-pct">0%</span>
-        </div>
-        <div class="rate-bar">
-          <div class="rate-fill" id="dash-rate-fill" style="width:0%"></div>
-        </div>
+        <div class="rate-label"><span>0%</span><span id="dash-rate-pct">0%</span></div>
+        <div class="rate-bar"><div class="rate-fill" id="dash-rate-fill" style="width:0%"></div></div>
       </div>
     </div>
 
-    <!-- Projection chart -->
+    <!-- Prognose-Chart -->
     <div class="card">
-      <div class="card-title">Prognose — nächste 5 Jahre</div>
-      <div class="chart-wrap">
-        <canvas id="projection-chart"></canvas>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div class="card-title" style="margin-bottom:0">Prognose · 5 Jahre</div>
+        <div class="toggle-group">
+          <span class="toggle-btn active" id="btn-nominal" onclick="setChartMode('nominal')">Nominal</span>
+          <span class="toggle-btn" id="btn-real" onclick="setChartMode('real')">Real</span>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="projection-chart"></canvas></div>
+      <div style="font-size:11px;color:var(--text2);margin-top:8px">
+        Real = inflationsbereinigt (Kaufkraft). Einstellbar unter ⚙️ → FIRE-Einstellungen.
       </div>
     </div>
-  </div>
 
-  <!-- ── Einkommen ── -->
+  </div><!-- /uebersicht -->
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       EINKOMMEN
+  ══════════════════════════════════════════════════════════════ -->
   <div id="page-einkommen" class="page">
-    <div class="page-header">
-      <h1>Einkommen</h1>
-      <p>Lohn, Nebenverdienst und weitere Einnahmen</p>
-    </div>
+    <div class="page-header"><h1>Einkommen</h1><p>Lohn, Nebenverdienst & weitere Einnahmen</p></div>
 
-    <div class="card" style="margin-bottom:16px">
+    <div class="card" style="margin-bottom:14px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
           <div class="card-title" style="margin-bottom:2px">Gesamt pro Monat</div>
-          <div style="font-size:24px;font-weight:700;color:var(--green)" id="einkommen-total">0</div>
+          <div style="font-size:26px;font-weight:700;color:var(--green)" id="einkommen-total">0</div>
         </div>
-        <div style="font-size:32px">💰</div>
+        <div style="font-size:30px">💰</div>
       </div>
     </div>
 
-    <div class="section-header">
-      <div class="section-title">Einnahmen</div>
-    </div>
     <div class="item-list" id="einkommen-list"></div>
     <div style="margin-top:10px">
       <button class="add-btn" onclick="openIncomeModal()">+ Einnahme hinzufügen</button>
     </div>
-  </div>
+  </div><!-- /einkommen -->
 
-  <!-- ── Ausgaben ── -->
+
+  <!-- ══════════════════════════════════════════════════════════════
+       AUSGABEN
+  ══════════════════════════════════════════════════════════════ -->
   <div id="page-ausgaben" class="page">
-    <div class="page-header">
-      <h1>Ausgaben</h1>
-      <p>Monatliche fixe und variable Kosten</p>
-    </div>
+    <div class="page-header"><h1>Ausgaben</h1><p>Fixkosten, variable Kosten & Raten</p></div>
 
-    <div class="card" style="margin-bottom:16px">
+    <div class="card" style="margin-bottom:14px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
-          <div class="card-title" style="margin-bottom:2px">Gesamt pro Monat</div>
-          <div style="font-size:24px;font-weight:700;color:var(--red)" id="ausgaben-total">0</div>
+          <div class="card-title" style="margin-bottom:2px">Ausgaben pro Monat</div>
+          <div style="font-size:26px;font-weight:700;color:var(--red)" id="ausgaben-total">0</div>
         </div>
-        <div style="font-size:32px">💸</div>
+        <div style="font-size:30px">💸</div>
       </div>
+      <div id="ausgaben-debt-row"></div>
     </div>
 
-    <div class="section-header">
-      <div class="section-title">Ausgaben</div>
-    </div>
     <div class="item-list" id="ausgaben-list"></div>
     <div style="margin-top:10px">
       <button class="add-btn" onclick="openExpenseModal()">+ Ausgabe hinzufügen</button>
     </div>
-  </div>
 
-  <!-- ── Investitionen ── -->
-  <div id="page-investitionen" class="page">
-    <div class="page-header">
-      <h1>Investitionen</h1>
-      <p>ETF, Aktien, Krypto, Säule 3a und mehr</p>
+    <div class="card" style="margin-top:14px">
+      <div class="card-title">Tipp: Budget-Limit</div>
+      <div style="font-size:13px;color:var(--text2);line-height:1.6">
+        Beim Hinzufügen einer Ausgabe kannst du ein optionales Budget-Limit setzen.
+        Überschreitungen werden farbig markiert.
+      </div>
+    </div>
+  </div><!-- /ausgaben -->
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       VERMÖGEN (Investitionen + Schulden)
+  ══════════════════════════════════════════════════════════════ -->
+  <div id="page-vermoegen" class="page">
+    <div class="page-header"><h1>Vermögen</h1><p>Investitionen & Schulden</p></div>
+
+    <!-- ── Depot-Upload ── -->
+    <div class="section-divider">
+      <div class="sdiv-title">📊 Depot-Analyse</div>
+      <div class="sdiv-line"></div>
     </div>
 
-    <div class="card" style="margin-bottom:16px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <div>
-          <div class="card-title" style="margin-bottom:2px">Gesamt pro Monat</div>
-          <div style="font-size:24px;font-weight:700;color:var(--blue)" id="invest-total">0</div>
-        </div>
-        <div style="font-size:32px">📈</div>
+    <div class="card">
+      <div class="card-title" style="margin-bottom:8px">Excel / CSV hochladen</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6">
+        Exportiere deine Depot-Übersicht aus deiner Broker-App (z.B. Swissquote, IBKR, Degiro)
+        als Excel oder CSV und lade sie hier hoch.<br>
+        <strong style="color:var(--text)">Format:</strong> Spalte A = Datum, B = Depotwert, C = Eingesetzt (optional)
+      </div>
+      <label class="upload-zone" id="upload-zone">
+        <span class="upload-icon">📂</span>
+        <span class="upload-text">Excel (.xlsx) oder CSV hochladen</span>
+        <span class="upload-sub">Tippen zum Auswählen</span>
+        <input type="file" accept=".xlsx,.xls,.csv,.ods" onchange="handlePortfolioUpload(event)" style="display:none">
+      </label>
+      <div style="font-size:11px;color:var(--text2);margin-top:8px;text-align:center">
+        Alle Daten bleiben lokal auf deinem Gerät – nichts wird hochgeladen
       </div>
     </div>
 
-    <div class="section-header">
-      <div class="section-title">Investitionen</div>
+    <!-- Depot Chart + Stats (versteckt bis Upload) -->
+    <div id="depot-chart-section" style="display:none">
+      <div id="depot-stats"></div>
+      <div class="card" style="margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div class="card-title" style="margin-bottom:0">Wertentwicklung</div>
+          <button class="toggle-btn" onclick="clearPortfolioHistory()" style="color:var(--red);border-color:rgba(239,68,68,.3)">✕ Löschen</button>
+        </div>
+        <div class="chart-wrap" style="height:220px"><canvas id="depot-chart"></canvas></div>
+      </div>
     </div>
+
+    <!-- ── Investitionen ── -->
+    <div class="section-divider">
+      <div class="sdiv-title">📈 Investitionen</div>
+      <div class="sdiv-line"></div>
+    </div>
+
+    <div class="card" style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div>
+          <div class="card-title" style="margin-bottom:2px">Monatlich</div>
+          <div style="font-size:22px;font-weight:700;color:var(--blue)" id="invest-total">0</div>
+        </div>
+        <div>
+          <div class="card-title" style="margin-bottom:2px;text-align:right">Depotwert heute</div>
+          <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
+            <div style="font-size:22px;font-weight:700;color:var(--green)" id="portfolio-display">0 CHF</div>
+            <button class="btn btn-ghost btn-icon" onclick="openPortfolioModal()">✏️</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="item-list" id="invest-list"></div>
-    <div style="margin-top:10px">
+    <div style="margin-top:8px">
       <button class="add-btn" onclick="openInvestmentModal()">+ Investition hinzufügen</button>
     </div>
 
-    <div class="card" style="margin-top:16px">
-      <div class="card-title">Hinweis</div>
-      <div style="font-size:13px;color:var(--text2);line-height:1.6">
-        Die erwartete Rendite ist ein Schätzwert. Historisch haben globale ETFs
-        ca. 7–10% p.a. erzielt. Vergangene Renditen sind keine Garantie für
-        zukünftige Ergebnisse.
+    <div class="card" style="margin-top:12px">
+      <div class="card-title">Hinweis zur Rendite</div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.6">
+        Historisch ca. 7–10% p.a. für globale ETFs. Vergangene Renditen sind
+        keine Garantie für die Zukunft. Krypto und Einzelaktien können stark schwanken.
       </div>
     </div>
-  </div>
 
-  <!-- ── Ziele ── -->
+    <!-- ── Schulden ── -->
+    <div class="section-divider" style="margin-top:8px">
+      <div class="sdiv-title">🏦 Schulden</div>
+      <div class="sdiv-line"></div>
+    </div>
+
+    <div class="card" style="margin-bottom:10px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div>
+          <div class="card-title" style="margin-bottom:2px">Restschuld</div>
+          <div style="font-size:22px;font-weight:700;color:var(--red)" id="debt-total">0</div>
+        </div>
+        <div>
+          <div class="card-title" style="margin-bottom:2px">Rate/Mt.</div>
+          <div style="font-size:22px;font-weight:700;color:var(--orange)" id="debt-pay-total">0</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="item-list" id="debt-list"></div>
+    <div style="margin-top:8px">
+      <button class="add-btn" onclick="openDebtModal()">+ Schuld hinzufügen</button>
+    </div>
+  </div><!-- /vermoegen -->
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       ZIELE (FIRE + Sparziele)
+  ══════════════════════════════════════════════════════════════ -->
   <div id="page-ziele" class="page">
-    <div class="page-header">
-      <h1>Sparziele</h1>
-      <p>Wann erreichst du deine Träume?</p>
+    <div class="page-header"><h1>Ziele</h1><p>Sparziele & finanzielle Freiheit</p></div>
+
+    <!-- FIRE Rechner -->
+    <div class="card" id="fire-card">
+      <div style="font-size:13px;color:var(--text2)">Lade…</div>
+    </div>
+
+    <!-- Sparziele -->
+    <div class="section-divider">
+      <div class="sdiv-title">🎯 Sparziele</div>
+      <div class="sdiv-line"></div>
     </div>
 
     <div id="ziele-list"></div>
@@ -174,41 +281,41 @@
       <button class="add-btn" onclick="openGoalModal()">+ Sparziel festlegen</button>
     </div>
 
-    <div class="card" style="margin-top:16px">
-      <div class="card-title">Wie funktioniert die Berechnung?</div>
-      <div style="font-size:13px;color:var(--text2);line-height:1.6">
-        Die Zieldauer basiert auf deinem monatlich frei verfügbaren Betrag
-        (Einkommen − Ausgaben − Investitionen). Je mehr du sparst, desto
-        schneller erreichst du deine Ziele.
+    <div class="card" style="margin-top:14px">
+      <div class="card-title">So funktioniert die Zeitberechnung</div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.6">
+        Die Dauer basiert auf dem monatlich frei verfügbaren Betrag
+        (Einkommen − Ausgaben − Investitionen − Schuldraten).
+        Je mehr du sparst, desto schneller erreichst du deine Ziele.
       </div>
     </div>
-  </div>
+  </div><!-- /ziele -->
 
-  <!-- ── Bottom Nav ── -->
+
+  <!-- ══════════════════════════════════════════════════════════════
+       BOTTOM NAV
+  ══════════════════════════════════════════════════════════════ -->
   <nav>
     <button class="nav-btn active" id="nav-uebersicht" onclick="navigate('uebersicht')">
-      <span class="icon">🏠</span>
-      Übersicht
+      <span class="icon">🏠</span>Übersicht
     </button>
     <button class="nav-btn" id="nav-einkommen" onclick="navigate('einkommen')">
-      <span class="icon">💰</span>
-      Einkommen
+      <span class="icon">💰</span>Einkommen
     </button>
     <button class="nav-btn" id="nav-ausgaben" onclick="navigate('ausgaben')">
-      <span class="icon">💸</span>
-      Ausgaben
+      <span class="icon">💸</span>Ausgaben
     </button>
-    <button class="nav-btn" id="nav-investitionen" onclick="navigate('investitionen')">
-      <span class="icon">📈</span>
-      Invest
+    <button class="nav-btn" id="nav-vermoegen" onclick="navigate('vermoegen')">
+      <span class="icon">📊</span>Vermögen
     </button>
     <button class="nav-btn" id="nav-ziele" onclick="navigate('ziele')">
-      <span class="icon">🎯</span>
-      Ziele
+      <span class="icon">🎯</span>Ziele
     </button>
   </nav>
-</div>
 
+</div><!-- /#app -->
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="app.js"></script>
 </body>
