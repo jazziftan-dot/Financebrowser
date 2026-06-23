@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="FinanzPlaner">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <title>FinanzPlaner</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Übersicht ── -->
+  <div id="page-uebersicht" class="page active">
+    <div class="page-header">
+      <h1>Übersicht</h1>
+      <p>Deine finanzielle Lage auf einen Blick</p>
+    </div>
+
+    <!-- Balance -->
+    <div class="card balance-card" onclick="openBalanceModal()" style="cursor:pointer">
+      <div class="balance-label">Kontostand</div>
+      <div class="balance-amount" id="dash-balance">0 CHF</div>
+      <div class="balance-sub" id="dash-balance-sub">Monatliche Sparrate: –</div>
+      <div style="margin-top:10px;font-size:12px;color:rgba(255,255,255,.5)">Tippen zum Bearbeiten</div>
+    </div>
+
+    <!-- Stats grid -->
+    <div class="stat-row">
+      <div class="stat-card">
+        <div class="lbl">Einkommen / Mt.</div>
+        <div class="val green" id="dash-income">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="lbl">Ausgaben / Mt.</div>
+        <div class="val red" id="dash-expenses">0</div>
+      </div>
+    </div>
+    <div class="stat-row">
+      <div class="stat-card">
+        <div class="lbl">Investitionen / Mt.</div>
+        <div class="val blue" id="dash-investments">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="lbl">Frei / Mt.</div>
+        <div class="val green" id="dash-savings">0</div>
+      </div>
+    </div>
+
+    <!-- Savings rate -->
+    <div class="card">
+      <div class="card-title">Sparquote</div>
+      <div class="rate-wrap">
+        <div class="rate-label">
+          <span>0%</span>
+          <span id="dash-rate-pct">0%</span>
+        </div>
+        <div class="rate-bar">
+          <div class="rate-fill" id="dash-rate-fill" style="width:0%"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Projection chart -->
+    <div class="card">
+      <div class="card-title">Prognose — nächste 5 Jahre</div>
+      <div class="chart-wrap">
+        <canvas id="projection-chart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Einkommen ── -->
+  <div id="page-einkommen" class="page">
+    <div class="page-header">
+      <h1>Einkommen</h1>
+      <p>Lohn, Nebenverdienst und weitere Einnahmen</p>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div class="card-title" style="margin-bottom:2px">Gesamt pro Monat</div>
+          <div style="font-size:24px;font-weight:700;color:var(--green)" id="einkommen-total">0</div>
+        </div>
+        <div style="font-size:32px">💰</div>
+      </div>
+    </div>
+
+    <div class="section-header">
+      <div class="section-title">Einnahmen</div>
+    </div>
+    <div class="item-list" id="einkommen-list"></div>
+    <div style="margin-top:10px">
+      <button class="add-btn" onclick="openIncomeModal()">+ Einnahme hinzufügen</button>
+    </div>
+  </div>
+
+  <!-- ── Ausgaben ── -->
+  <div id="page-ausgaben" class="page">
+    <div class="page-header">
+      <h1>Ausgaben</h1>
+      <p>Monatliche fixe und variable Kosten</p>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div class="card-title" style="margin-bottom:2px">Gesamt pro Monat</div>
+          <div style="font-size:24px;font-weight:700;color:var(--red)" id="ausgaben-total">0</div>
+        </div>
+        <div style="font-size:32px">💸</div>
+      </div>
+    </div>
+
+    <div class="section-header">
+      <div class="section-title">Ausgaben</div>
+    </div>
+    <div class="item-list" id="ausgaben-list"></div>
+    <div style="margin-top:10px">
+      <button class="add-btn" onclick="openExpenseModal()">+ Ausgabe hinzufügen</button>
+    </div>
+  </div>
+
+  <!-- ── Investitionen ── -->
+  <div id="page-investitionen" class="page">
+    <div class="page-header">
+      <h1>Investitionen</h1>
+      <p>ETF, Aktien, Krypto, Säule 3a und mehr</p>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div class="card-title" style="margin-bottom:2px">Gesamt pro Monat</div>
+          <div style="font-size:24px;font-weight:700;color:var(--blue)" id="invest-total">0</div>
+        </div>
+        <div style="font-size:32px">📈</div>
+      </div>
+    </div>
+
+    <div class="section-header">
+      <div class="section-title">Investitionen</div>
+    </div>
+    <div class="item-list" id="invest-list"></div>
+    <div style="margin-top:10px">
+      <button class="add-btn" onclick="openInvestmentModal()">+ Investition hinzufügen</button>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">Hinweis</div>
+      <div style="font-size:13px;color:var(--text2);line-height:1.6">
+        Die erwartete Rendite ist ein Schätzwert. Historisch haben globale ETFs
+        ca. 7–10% p.a. erzielt. Vergangene Renditen sind keine Garantie für
+        zukünftige Ergebnisse.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Ziele ── -->
+  <div id="page-ziele" class="page">
+    <div class="page-header">
+      <h1>Sparziele</h1>
+      <p>Wann erreichst du deine Träume?</p>
+    </div>
+
+    <div id="ziele-list"></div>
+    <div style="margin-top:4px">
+      <button class="add-btn" onclick="openGoalModal()">+ Sparziel festlegen</button>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">Wie funktioniert die Berechnung?</div>
+      <div style="font-size:13px;color:var(--text2);line-height:1.6">
+        Die Zieldauer basiert auf deinem monatlich frei verfügbaren Betrag
+        (Einkommen − Ausgaben − Investitionen). Je mehr du sparst, desto
+        schneller erreichst du deine Ziele.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Bottom Nav ── -->
+  <nav>
+    <button class="nav-btn active" id="nav-uebersicht" onclick="navigate('uebersicht')">
+      <span class="icon">🏠</span>
+      Übersicht
+    </button>
+    <button class="nav-btn" id="nav-einkommen" onclick="navigate('einkommen')">
+      <span class="icon">💰</span>
+      Einkommen
+    </button>
+    <button class="nav-btn" id="nav-ausgaben" onclick="navigate('ausgaben')">
+      <span class="icon">💸</span>
+      Ausgaben
+    </button>
+    <button class="nav-btn" id="nav-investitionen" onclick="navigate('investitionen')">
+      <span class="icon">📈</span>
+      Invest
+    </button>
+    <button class="nav-btn" id="nav-ziele" onclick="navigate('ziele')">
+      <span class="icon">🎯</span>
+      Ziele
+    </button>
+  </nav>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
