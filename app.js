@@ -344,13 +344,72 @@ RENDERERS.ausgaben = function renderAusgaben() {
 
 // ── Vermögen (Investitionen + Schulden) ────────────────────────────────────
 RENDERERS.vermoegen = function renderVermoegen() {
-  // Depot-Upload Chart (falls vorhanden)
   renderDepotSection();
+  renderVermoegenSummary();
+  renderInvestSection();
+  renderDebtSection();
+};
 
-  // Investitionen
-  el('invest-total').textContent = fmt(totalInvestments());
+function renderVermoegenSummary() {
+  const nw     = netWorth();
+  const assets = totalAssets();
+  const debt   = totalDebt();
+  const nwColor = nw >= 0 ? 'var(--green)' : 'var(--red)';
+  const nwIcon  = nw >= 0 ? '▲' : '▼';
+  el('vermoegen-summary').innerHTML = `
+  <div class="card nw-summary-card">
+    <div class="card-title" style="margin-bottom:12px">Übersicht Nettovermögen</div>
+    <div class="nw-sum-row">
+      <div class="nw-sum-item">
+        <div class="nw-sum-label">💰 Vermögen</div>
+        <div class="nw-sum-val green">${fmtK(assets)}</div>
+      </div>
+      <div class="nw-sum-op">−</div>
+      <div class="nw-sum-item">
+        <div class="nw-sum-label">🏦 Schulden</div>
+        <div class="nw-sum-val red">${fmtK(debt)}</div>
+      </div>
+      <div class="nw-sum-op">=</div>
+      <div class="nw-sum-item">
+        <div class="nw-sum-label">📊 Netto</div>
+        <div class="nw-sum-val" style="color:${nwColor}">${nwIcon} ${fmtK(Math.abs(nw))}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderInvestSection() {
+  el('invest-total').textContent    = fmt(totalInvestments());
   el('portfolio-display').textContent = fmt(state.portfolioValue);
 
+  // Aufteilung nach Kategorie
+  const allocEl = el('invest-alloc-section');
+  if (state.investments.length) {
+    const total = totalInvestments();
+    const cats  = {};
+    for (const i of state.investments) cats[i.category] = (cats[i.category] || 0) + i.amount;
+    const bars  = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+    allocEl.innerHTML = `
+    <div class="alloc-wrap">
+      <div class="alloc-bar">
+        ${bars.map(([cat, amt]) =>
+          `<div class="alloc-seg" style="width:${(amt/total*100).toFixed(1)}%;background:${colorFor(cat)}" title="${cat}: ${fmt(amt)}/Mt."></div>`
+        ).join('')}
+      </div>
+      <div class="alloc-legend">
+        ${bars.map(([cat, amt]) => `
+        <span class="alloc-badge">
+          <span class="alloc-dot" style="background:${colorFor(cat)}"></span>
+          <span class="alloc-cat">${cat}</span>
+          <span class="alloc-pct">${(amt/total*100).toFixed(0)}%</span>
+        </span>`).join('')}
+      </div>
+    </div>`;
+  } else {
+    allocEl.innerHTML = '';
+  }
+
+  // Investitionsliste
   const ilist = el('invest-list');
   ilist.innerHTML = state.investments.length
     ? state.investments.map(i => listItem({
@@ -359,20 +418,58 @@ RENDERERS.vermoegen = function renderVermoegen() {
         amount: fmt(i.amount) + '/Mt.', amountColor: 'var(--blue)',
         id: i.id, type: 'investment'
       })).join('')
-    : emptyState('📈', 'Noch keine Investitionen.');
+    : emptyState('📈', 'Noch keine Investitionen erfasst.');
+}
 
-  // Schulden
-  el('debt-total').textContent    = fmt(totalDebt());
+function renderDebtSection() {
+  el('debt-total').textContent     = fmt(totalDebt());
   el('debt-pay-total').textContent = fmt(totalDebtPay()) + '/Mt.';
 
+  // Tilgungsstrategie
+  const stratEl = el('debt-strategy');
+  if (state.debts.length >= 2) {
+    const byInterest = [...state.debts].sort((a, b) => b.interestRate - a.interestRate)[0];
+    const byAmount   = [...state.debts].sort((a, b) => a.remainingAmount - b.remainingAmount)[0];
+    const totalMonths = state.debts.reduce((s, d) => {
+      const m = debtPayoffMonths(d); return s + (m || 0);
+    }, 0);
+    stratEl.innerHTML = `
+    <div class="strat-box">
+      <div class="card-title" style="margin-bottom:8px">💡 Tilgungsstrategie</div>
+      <div class="strat-row">
+        <div class="strat-item">
+          <div class="strat-icon">⚡</div>
+          <div>
+            <div class="strat-label">Avalanche</div>
+            <div class="strat-desc">Höchste Zinsen zuerst zahlen → spart am meisten</div>
+            <div class="strat-target">${byInterest.name} · ${byInterest.interestRate}% p.a.</div>
+          </div>
+        </div>
+        <div class="strat-item">
+          <div class="strat-icon">❄️</div>
+          <div>
+            <div class="strat-label">Snowball</div>
+            <div class="strat-desc">Kleinste Schuld zuerst → motivierender</div>
+            <div class="strat-target">${byAmount.name} · ${fmtK(byAmount.remainingAmount)}</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  } else {
+    stratEl.innerHTML = '';
+  }
+
+  // Schuldenliste
   const dlist = el('debt-list');
   if (!state.debts.length) {
-    dlist.innerHTML = emptyState('🏦', 'Keine Schulden – super!');
+    dlist.innerHTML = emptyState('🏦', 'Keine Schulden – sehr gut!');
     return;
   }
   dlist.innerHTML = state.debts.map(d => {
     const months = debtPayoffMonths(d);
-    const pct = d.originalAmount > 0 ? Math.max(0, Math.min(100, (1 - d.remainingAmount / d.originalAmount) * 100)) : 0;
+    const pct    = d.originalAmount > 0
+      ? Math.max(0, Math.min(100, (1 - d.remainingAmount / d.originalAmount) * 100))
+      : 0;
     return `
     <div class="list-item">
       <div class="item-left">
@@ -380,11 +477,11 @@ RENDERERS.vermoegen = function renderVermoegen() {
         <div style="min-width:0">
           <div class="item-name">${d.name}</div>
           <div class="item-sub">${d.category} · ${d.interestRate}% Zins · ${fmt(d.monthlyPayment)}/Mt.</div>
-          <div style="margin-top:5px">
+          <div style="margin-top:6px">
             <div class="budget-bar"><div class="budget-fill budget-ok" style="width:${pct}%"></div></div>
             <div style="font-size:11px;color:var(--text2);margin-top:3px">
               ${pct.toFixed(0)}% abgezahlt ·
-              <span class="payoff-chip">${months ? 'Frei in ' + formatETA(months) : 'Rate erhöhen!'}</span>
+              <span class="payoff-chip">${months ? 'Frei in ' + formatETA(months) : '⚠️ Rate erhöhen!'}</span>
             </div>
           </div>
         </div>
@@ -398,7 +495,7 @@ RENDERERS.vermoegen = function renderVermoegen() {
       </div>
     </div>`;
   }).join('');
-};
+}
 
 // ── Ziele ──────────────────────────────────────────────────────────────────
 RENDERERS.ziele = function renderZiele() {
@@ -407,16 +504,72 @@ RENDERERS.ziele = function renderZiele() {
 };
 
 function renderFIRE() {
-  const fn = fireNumber();
-  const fp = fireProgress();
-  const feta = fireETA();
-  const fexp = fireExpenses();
+  const fn        = fireNumber();
+  const fp        = fireProgress();
+  const feta      = fireETA();
+  const fexp      = fireExpenses();
   const remaining = Math.max(0, fn - state.portfolioValue);
+  const inv       = totalInvestments();
+
+  // Meilensteine
+  const milestones = [25, 50, 75, 100];
+  const milestonesHTML = fn > 0 ? `
+  <div class="milestone-row">
+    ${milestones.map(m => {
+      const reached = fp >= m;
+      return `<div class="milestone-item ${reached ? 'ms-reached' : ''}">
+        <div class="milestone-dot">${reached ? '✓' : ''}</div>
+        <div class="milestone-pct">${m}%</div>
+      </div>`;
+    }).join('')}
+  </div>` : '';
+
+  // Szenarien: wie viel müsste ich monatlich investieren?
+  const scenariosHTML = fn > 0 && fn > state.portfolioValue ? (() => {
+    const r  = weightedReturn() / 100 / 12;
+    const pv = state.portfolioValue;
+    const yrs = [10, 15, 20, 30];
+    const items = yrs.map(y => {
+      const n    = y * 12;
+      const fvPv = pv * Math.pow(1 + r, n);
+      if (fn <= fvPv) return { y, label: 'Schon erreicht!', ok: true };
+      const pmt = r > 0
+        ? (fn - fvPv) * r / (Math.pow(1 + r, n) - 1)
+        : (fn - fvPv) / n;
+      const needed = Math.max(0, Math.ceil(pmt));
+      const diff   = needed - inv;
+      return { y, label: fmt(needed) + '/Mt.', diff, ok: false };
+    });
+    return `
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+      <div class="card-title" style="margin-bottom:8px">📅 Monatliche Investition zum Ziel</div>
+      <div class="kpi-grid">
+        ${items.map(s => `
+        <div class="kpi-item">
+          <div class="kpi-label">In ${s.y} Jahren</div>
+          <div class="kpi-value" style="font-size:14px;color:${s.ok ? 'var(--green)' : 'var(--text)'}">${s.label}</div>
+          ${!s.ok && s.diff !== undefined && inv > 0
+            ? `<div style="font-size:11px;margin-top:2px;color:${s.diff > 0 ? 'var(--red)' : 'var(--green)'}">
+                ${s.diff > 0 ? '+' + fmt(s.diff) + ' mehr' : '✓ Im Plan'}
+               </div>` : ''}
+        </div>`).join('')}
+      </div>
+    </div>`;
+  })() : '';
 
   el('fire-card').innerHTML = `
-    <div class="card-title" style="margin-bottom:6px">FIRE-Rechner</div>
-    <div style="font-size:12px;color:var(--text2);margin-bottom:14px">Finanzielle Freiheit bei ${state.settings.fireWithdrawalRate}% Entnahmerate (${state.settings.fireWithdrawalRate === 4 ? 'Trinity-Studie' : 'angepasst'})</div>
-    <div class="kpi-grid">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+      <div>
+        <div style="font-size:17px;font-weight:700">🔥 FIRE-Rechner</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:2px">
+          ${state.settings.fireWithdrawalRate}% Entnahmerate ·
+          ${state.settings.fireWithdrawalRate === 4 ? 'Trinity-Studie' : 'angepasst'}
+        </div>
+      </div>
+      <button class="btn btn-ghost btn-icon" onclick="openFIRESettings()" title="Einstellungen">⚙️</button>
+    </div>
+
+    <div class="kpi-grid" style="margin-bottom:14px">
       <div class="kpi-item">
         <div class="kpi-label">FIRE-Zahl</div>
         <div class="kpi-value">${fmtK(fn)}</div>
@@ -426,55 +579,84 @@ function renderFIRE() {
         <div class="kpi-value green">${fmtK(state.portfolioValue)}</div>
       </div>
       <div class="kpi-item">
-        <div class="kpi-label">Ruhestand/Mt.</div>
+        <div class="kpi-label">Ruhestand / Mt.</div>
         <div class="kpi-value">${fmtK(fexp)}</div>
       </div>
       <div class="kpi-item">
         <div class="kpi-label">Noch benötigt</div>
-        <div class="kpi-value red">${fmtK(remaining)}</div>
+        <div class="kpi-value red">${remaining > 0 ? fmtK(remaining) : '✓ Erreicht!'}</div>
       </div>
     </div>
-    <div style="margin:14px 0 6px;display:flex;justify-content:space-between;font-size:13px">
+
+    ${milestonesHTML}
+
+    <div style="margin:12px 0 6px;display:flex;justify-content:space-between;font-size:13px">
       <span style="color:var(--text2)">Fortschritt</span>
       <strong>${fp.toFixed(1)}%</strong>
     </div>
     <div class="rate-bar" style="height:10px">
-      <div style="height:100%;width:${fp}%;background:linear-gradient(90deg,var(--primary),var(--primary-light));border-radius:99px;transition:width .6s"></div>
+      <div style="height:100%;width:${Math.min(100, fp)}%;background:linear-gradient(90deg,var(--primary),var(--primary-light));border-radius:99px;transition:width .6s"></div>
     </div>
+
     <div style="margin-top:12px;padding:12px;background:var(--surface2);border-radius:var(--radius-sm);text-align:center;font-size:14px">
-      ${feta
-        ? `🎯 Finanzielle Freiheit in ca. <strong>${formatETA(feta)}</strong>`
-        : fn > 0
-          ? `<span style="color:var(--text2)">Trage monatliche Investitionen ein für Zeitprognose</span>`
-          : `<span style="color:var(--text2)">Erfasse Einkommen und Ausgaben für die Berechnung</span>`}
+      ${fp >= 100
+        ? `🎉 <strong style="color:var(--green)">FIRE erreicht!</strong> Du bist finanziell frei.`
+        : feta
+          ? `🎯 Finanzielle Freiheit in ca. <strong>${formatETA(feta)}</strong>`
+          : inv > 0 && fn > 0
+            ? `<span style="color:var(--text2)">Portfolio wächst – Prognose überschreitet 720 Monate</span>`
+            : fn > 0
+              ? `<span style="color:var(--text2)">Trage monatliche Investitionen ein für die Prognose</span>`
+              : `<span style="color:var(--text2)">Erfasse Einkommen und Ausgaben für die Berechnung</span>`}
     </div>
-    <button class="btn btn-ghost btn-full" style="margin-top:10px;font-size:13px" onclick="openFIRESettings()">⚙️ FIRE-Einstellungen anpassen</button>`;
+
+    ${scenariosHTML}`;
 }
 
 function renderGoals() {
   const list = el('ziele-list');
-  const sav = Math.max(0, monthlySavings());
+  const sav  = Math.max(0, monthlySavings());
   if (!state.goals.length) {
     list.innerHTML = emptyState('🎯', 'Noch keine Sparziele festgelegt.');
     return;
   }
-  list.innerHTML = state.goals.map(g => {
+
+  const active = state.goals.filter(g => g.currentAmount < g.targetAmount);
+  const done   = state.goals.filter(g => g.currentAmount >= g.targetAmount);
+
+  const renderDone = done.map(g => {
+    const pct = Math.min(100, g.currentAmount / g.targetAmount * 100);
+    return `
+    <div class="card goal-card-done">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:16px;font-weight:700">${g.icon || '🎯'} ${g.name}</div>
+          <div style="font-size:13px;color:var(--green);margin-top:3px;font-weight:600">🎉 Ziel erreicht · ${fmt(g.currentAmount)}</div>
+        </div>
+        <div style="display:flex;gap:5px">
+          <button class="btn btn-ghost btn-icon" onclick="openEdit('goal','${g.id}')">✏️</button>
+          <button class="btn btn-danger btn-icon" onclick="deleteItem('goal','${g.id}')">🗑️</button>
+        </div>
+      </div>
+      <div class="progress-bar" style="height:6px;margin-top:12px">
+        <div style="height:100%;width:100%;border-radius:99px;background:var(--green);transition:width .4s"></div>
+      </div>
+    </div>`;
+  });
+
+  const renderActive = active.map(g => {
     const rem = Math.max(0, g.targetAmount - g.currentAmount);
     const pct = g.targetAmount > 0 ? Math.min(100, g.currentAmount / g.targetAmount * 100) : 0;
 
-    let etaLabel = '–';
+    let etaLabel  = '–';
     let etaMonths = null;
-    if (rem === 0) {
-      etaLabel = 'Erreicht! 🎉';
-    } else if (sav > 0) {
+    if (sav > 0 && rem > 0) {
       etaMonths = Math.ceil(rem / sav);
-      const targetDate = new Date();
-      targetDate.setMonth(targetDate.getMonth() + etaMonths);
-      const dateStr = targetDate.toLocaleDateString('de-CH', { month: 'long', year: 'numeric' });
-      etaLabel = `${formatETA(etaMonths)} · ${dateStr}`;
+      const d = new Date();
+      d.setMonth(d.getMonth() + etaMonths);
+      etaLabel = `${formatETA(etaMonths)} · ${d.toLocaleDateString('de-CH', { month: 'long', year: 'numeric' })}`;
     }
 
-    // "What-if" insights
     const insights = goalInsights(rem, sav, etaMonths);
 
     return `
@@ -490,25 +672,24 @@ function renderGoals() {
         </div>
       </div>
 
-      <!-- Progress bar -->
-      <div class="progress-bar" style="height:10px"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <div class="progress-bar" style="height:10px">
+        <div class="progress-fill" style="width:${pct}%"></div>
+      </div>
       <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2);margin-top:5px;margin-bottom:12px">
         <span><strong style="color:var(--text)">${pct.toFixed(0)}%</strong> erreicht</span>
         <span>Noch <strong style="color:var(--text)">${fmt(rem)}</strong></span>
       </div>
 
-      <!-- ETA highlight -->
       ${etaMonths ? `
       <div class="goal-eta-box">
-        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">⏱ Zieldatum bei aktuellem Sparpotenzial</div>
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">⏱ Zieldatum bei aktuellem Sparpotenzial</div>
         <div style="font-size:15px;font-weight:700;color:var(--primary-light)">${etaLabel}</div>
-        <div style="font-size:12px;color:var(--text2);margin-top:2px">${fmt(sav)}/Mt. frei · ${fmt(rem)} noch benötigt</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:3px">${fmt(sav)}/Mt. verfügbar · ${fmt(rem)} noch benötigt</div>
       </div>` : sav <= 0 ? `
-      <div class="goal-eta-box" style="border-color:var(--red)">
+      <div class="goal-eta-box" style="border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.06)">
         <div style="font-size:13px;color:var(--red)">⚠️ Kein freies Kapital – überprüfe deine Ausgaben</div>
       </div>` : ''}
 
-      <!-- Insights -->
       ${insights.length ? `
       <div style="margin-top:10px">
         <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:6px">💡 Spar-Szenarien</div>
@@ -523,7 +704,9 @@ function renderGoals() {
         </div>
       </div>` : ''}
     </div>`;
-  }).join('');
+  });
+
+  list.innerHTML = [...renderActive, ...renderDone].join('');
 }
 
 function goalInsights(remaining, savingsPerMonth, currentMonths) {
