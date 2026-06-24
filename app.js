@@ -10,19 +10,20 @@ const DEFAULT_STATE = {
   debts: [],
   goals: [],
   portfolioValue: 0,
-  portfolioHistory: [],
-  settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0 }
+  networthHistory: [],
+  transactions: [],
+  settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0, taxEstimate: null, taxCanton: 'ZH' }
 };
 
 function migrateState(raw) {
   if (!raw) return JSON.parse(JSON.stringify(DEFAULT_STATE));
-  // Migrate single balance → accounts array
   if (typeof raw.balance === 'number' && !raw.accounts) {
     raw.accounts = raw.balance > 0
       ? [{ id: uid(), name: 'Girokonto', balance: raw.balance, type: 'checking' }]
       : [];
     delete raw.balance;
   }
+  delete raw.portfolioHistory;
   return {
     ...JSON.parse(JSON.stringify(DEFAULT_STATE)),
     ...raw,
@@ -38,25 +39,28 @@ let state = (() => {
 })();
 
 let projectionChart = null;
-let editContext = null;
-let chartMode = 'nominal';
+let donutChartInst  = null;
+let nwHistChartInst = null;
+let editContext     = null;
+let chartMode       = 'nominal';
 
 function saveState() { localStorage.setItem('finanzplaner', JSON.stringify(state)); }
 
 // ── Formatierung ───────────────────────────────────────────────────────────
 function fmt(n) {
-  return new Intl.NumberFormat('de-CH', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(n) + ' ' + state.currency;
+  return new Intl.NumberFormat('de-CH', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(n) + ' ' + state.currency;
 }
 function fmtK(n) {
-  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M ' + state.currency;
-  if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(0) + 'k ' + state.currency;
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M ' + state.currency;
+  if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(0) + 'k ' + state.currency;
   return fmt(n);
 }
 
 // ── Berechnungen ───────────────────────────────────────────────────────────
 const totalAccounts    = () => state.accounts.reduce((s, a) => s + a.balance, 0);
 const totalIncome      = () => state.income.reduce((s, i) => s + i.amount, 0);
-const totalExpenses    = () => state.expenses.reduce((s, e) => s + e.amount, 0);
+const monthlyAmt       = e => e.frequency === 'yearly' ? e.amount / 12 : e.amount;
+const totalExpenses    = () => state.expenses.reduce((s, e) => s + monthlyAmt(e), 0);
 const totalInvestments = () => state.investments.reduce((s, i) => s + i.amount, 0);
 const totalDebtPay     = () => state.debts.reduce((s, d) => s + d.monthlyPayment, 0);
 const totalDebt        = () => state.debts.reduce((s, d) => s + d.remainingAmount, 0);
@@ -73,7 +77,6 @@ function emergencyMonths() {
   const costs = totalExpenses() + totalDebtPay();
   return costs > 0 ? totalAccounts() / costs : 0;
 }
-
 function emergencyStatus() {
   const m = emergencyMonths();
   if (m < 1) return { cls: 'badge-red',    icon: '🔴', label: `${m.toFixed(1)} Monate – Kritisch` };
@@ -91,8 +94,7 @@ function fireETA() {
   if (target <= 0 || totalInvestments() <= 0) return null;
   const r = weightedReturn() / 100 / 12;
   let p = state.portfolioValue;
-  const pmt = totalInvestments();
-  for (let m = 1; m <= 720; m++) { p = p * (1 + r) + pmt; if (p >= target) return m; }
+  for (let m = 1; m <= 720; m++) { p = p * (1 + r) + totalInvestments(); if (p >= target) return m; }
   return null;
 }
 
@@ -112,7 +114,86 @@ function formatETA(months) {
   return y + 'J' + (m ? ' ' + m + 'Mt.' : '');
 }
 
-// ── Lookup-Tabellen ────────────────────────────────────────────────────────
+// ── 50/30/20 ───────────────────────────────────────────────────────────────
+const NEEDS_CATS = ['Wohnen','Lebensmittel','Transport','Gesundheit','Versicherungen'];
+const WANTS_CATS = ['Unterhaltung','Kleidung','Bildung','Haustiere','Freizeit','Ausgabe'];
+
+function calc503020() {
+  const income = totalIncome();
+  if (income <= 0) return null;
+  const needs   = state.expenses.filter(e => NEEDS_CATS.includes(e.category)).reduce((s, e) => s + monthlyAmt(e), 0);
+  const wants   = state.expenses.filter(e => WANTS_CATS.includes(e.category)).reduce((s, e) => s + monthlyAmt(e), 0);
+  const savings = totalInvestments() + Math.max(0, monthlySavings());
+  return {
+    needs:   { amount: needs,   pct: needs / income * 100,   target: 50, dir: 'max' },
+    wants:   { amount: wants,   pct: wants / income * 100,   target: 30, dir: 'max' },
+    savings: { amount: savings, pct: savings / income * 100, target: 20, dir: 'min' }
+  };
+}
+
+function render503020(containerId) {
+  const data = calc503020();
+  const el2 = document.getElementById(containerId);
+  if (!el2) return;
+  if (!data) { el2.innerHTML = '<div style="font-size:13px;color:var(--text2)">Erfasse Einkommen für die Auswertung.</div>'; return; }
+  const items = [
+    { label: 'Fixkosten · Ziel ≤50%', ...data.needs,   color: '#3b82f6' },
+    { label: 'Variabel · Ziel ≤30%',  ...data.wants,   color: '#f59e0b' },
+    { label: 'Sparen · Ziel ≥20%',    ...data.savings, color: '#10b981' }
+  ];
+  el2.innerHTML = items.map(item => {
+    const ok = item.dir === 'min' ? item.pct >= item.target : item.pct <= item.target;
+    return `
+    <div style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+        <span style="color:var(--text2)">${item.label}</span>
+        <span style="font-weight:700;color:${ok ? 'var(--green)' : 'var(--red)'}">
+          ${item.pct.toFixed(0)}% ${ok ? '✓' : (item.dir === 'min' ? '↓' : '↑')}
+        </span>
+      </div>
+      <div class="rate-bar" style="height:8px">
+        <div style="height:100%;width:${Math.min(100, item.pct)}%;background:${ok ? item.color : 'var(--red)'};border-radius:99px;transition:width .4s"></div>
+      </div>
+      <div style="font-size:11px;color:var(--text2);margin-top:2px">${fmt(item.amount)} / Monat</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Schweizer Steuer-Schätzung ─────────────────────────────────────────────
+const CANTON_RATES = {
+  'AG':25,'AI':18,'AR':20,'BE':29,'BL':26,'BS':30,'FR':27,'GE':32,
+  'GL':22,'GR':21,'JU':28,'LU':22,'NE':28,'NW':18,'OW':19,'SG':23,
+  'SH':22,'SO':25,'SZ':16,'TG':23,'TI':24,'UR':18,'VD':30,'VS':24,'ZG':15,'ZH':27
+};
+
+function estimateTax(grossAnnual, canton) {
+  const rate = (CANTON_RATES[canton] || 27) / 100;
+  const yearly = grossAnnual * rate;
+  return { yearly, monthly: yearly / 12, rate: rate * 100, netto: grossAnnual - yearly, nettoMonthly: (grossAnnual - yearly) / 12 };
+}
+
+// ── Schulden-Simulation ────────────────────────────────────────────────────
+function simulateDebtPayoff(sortedDebts, extraBudget) {
+  const debts = sortedDebts.map(d => ({ ...d, remaining: d.remainingAmount }));
+  let months = 0, totalInterest = 0;
+  while (debts.some(d => d.remaining > 0) && months < 720) {
+    months++;
+    let extra = extraBudget;
+    for (const d of debts) {
+      if (d.remaining <= 0) continue;
+      const interest = d.remaining * d.interestRate / 100 / 12;
+      totalInterest += interest;
+      d.remaining = d.remaining + interest - d.monthlyPayment;
+      if (d.remaining < 0) { extra += Math.abs(d.remaining); d.remaining = 0; }
+    }
+    for (const d of debts) {
+      if (d.remaining > 0) { d.remaining = Math.max(0, d.remaining - extra); break; }
+    }
+  }
+  return { months, totalInterest };
+}
+
+// ── Lookup ─────────────────────────────────────────────────────────────────
 const COLORS = {
   Lohn:'#6366f1', Nebeneinkommen:'#8b5cf6', Sonstiges:'#a78bfa',
   Wohnen:'#ef4444', Lebensmittel:'#f97316', Transport:'#f59e0b',
@@ -164,8 +245,10 @@ function refreshCurrent() {
   if (active) navigate(active);
 }
 
+const el = id => document.getElementById(id);
+
 // ── Dashboard ──────────────────────────────────────────────────────────────
-RENDERERS.uebersicht = function renderDashboard() {
+RENDERERS.uebersicht = function() {
   const income  = totalIncome();
   const exp     = totalExpenses();
   const invest  = totalInvestments();
@@ -174,37 +257,36 @@ RENDERERS.uebersicht = function renderDashboard() {
   const nw      = netWorth();
   const rate    = income > 0 ? Math.max(0, Math.min(100, (savings + invest) / income * 100)) : 0;
 
-  // Nettovermögen
   el('dash-networth').textContent = fmt(nw);
-  el('dash-nw-breakdown').textContent =
-    `Vermögen: ${fmtK(totalAssets())} · Schulden: ${fmtK(totalDebt())}`;
-
-  // Stats
-  el('dash-income').textContent     = fmt(income);
-  el('dash-expenses').textContent   = fmt(exp + debtP);
-  el('dash-investments').textContent = fmt(invest);
-  el('dash-savings').textContent    = fmt(savings);
+  el('dash-nw-breakdown').textContent = `Vermögen: ${fmtK(totalAssets())} · Schulden: ${fmtK(totalDebt())}`;
+  el('dash-income').textContent       = fmt(income);
+  el('dash-expenses').textContent     = fmt(exp + debtP);
+  el('dash-investments').textContent  = fmt(invest);
+  el('dash-savings').textContent      = fmt(savings);
   el('dash-savings').className = 'val ' + (savings >= 0 ? 'green' : 'red');
 
   // Notfallfonds
   const em = emergencyStatus();
-  const emMonths = emergencyMonths();
-  const emPct = Math.min(100, emMonths / 6 * 100);
-  const emBarColor = em.cls.includes('green') ? 'var(--green)' : em.cls.includes('yellow') ? 'var(--yellow)' : em.cls.includes('orange') ? '#f97316' : 'var(--red)';
+  const emPct = Math.min(100, emergencyMonths() / 6 * 100);
+  const emColor = em.cls.includes('green') ? 'var(--green)' : em.cls.includes('yellow') ? 'var(--yellow)' : em.cls.includes('orange') ? '#f97316' : 'var(--red)';
   el('dash-emergency').innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
       <span class="status-badge ${em.cls}">${em.icon} ${em.label}</span>
       <span style="font-size:12px;color:var(--text2)">Ziel: 3–6 Monate</span>
     </div>
     <div class="rate-bar" style="margin-top:8px">
-      <div style="height:100%;width:${emPct}%;background:${emBarColor};border-radius:99px;transition:width .4s"></div>
+      <div style="height:100%;width:${emPct}%;background:${emColor};border-radius:99px;transition:width .4s"></div>
     </div>
     <div style="font-size:11px;color:var(--text2);margin-top:5px">6-Monats-Ziel: ${fmt(totalExpenses() * 6)}</div>`;
 
-  // FIRE Mini-Widget
-  const fn = fireNumber();
-  const fp = fireProgress();
-  const feta = fireETA();
+  // 50/30/20
+  render503020('dash-budget-rule');
+
+  // Donut
+  renderDonutChart();
+
+  // FIRE
+  const fn = fireNumber(), fp = fireProgress(), feta = fireETA();
   el('dash-fire').innerHTML = fn > 0 && income > 0 ? `
     <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
       <span style="color:var(--text2)">${fmtK(state.portfolioValue)} / ${fmtK(fn)}</span>
@@ -215,61 +297,144 @@ RENDERERS.uebersicht = function renderDashboard() {
     </div>
     ${feta ? `<div style="font-size:12px;color:var(--text2);margin-top:6px">🎯 Finanzielle Freiheit in ca. <strong style="color:var(--text)">${formatETA(feta)}</strong></div>`
            : `<div style="font-size:12px;color:var(--text2);margin-top:6px">Trage deinen Depotwert ein für die Prognose</div>`}`
-    : `<div style="font-size:13px;color:var(--text2)">Erfasse Einkommen und Investitionen um den FIRE-Fortschritt zu sehen</div>`;
+    : `<div style="font-size:13px;color:var(--text2)">Erfasse Einkommen und Investitionen für den FIRE-Fortschritt</div>`;
 
   // Sparquote
   el('dash-rate-pct').textContent  = rate.toFixed(0) + '%';
   el('dash-rate-fill').style.width = rate + '%';
 
-  // Chart
+  // Nettovermögen-Verlauf
+  renderNetworthHistoryChart();
+
+  // Prognose
   renderProjectionChart();
 };
+
+// ── Donut Chart ────────────────────────────────────────────────────────────
+function renderDonutChart() {
+  const canvas = el('donut-chart');
+  const legend = el('dash-donut-legend');
+  if (!canvas || !legend) return;
+
+  const catMap = {};
+  state.expenses.forEach(e => { catMap[e.category] = (catMap[e.category] || 0) + monthlyAmt(e); });
+  const entries = Object.entries(catMap).sort((a, b) => b[1] - a[1]);
+
+  if (!entries.length) {
+    legend.innerHTML = '<span style="color:var(--text2)">Noch keine Ausgaben erfasst</span>';
+    if (donutChartInst) { donutChartInst.destroy(); donutChartInst = null; }
+    return;
+  }
+
+  const labels = entries.map(([k]) => k);
+  const data   = entries.map(([, v]) => v);
+  const colors = labels.map(l => colorFor(l));
+  const total  = data.reduce((a, b) => a + b, 0);
+
+  if (donutChartInst) donutChartInst.destroy();
+  donutChartInst = new Chart(canvas, {
+    type: 'doughnut',
+    data: { labels, datasets: [{ data, backgroundColor: colors, borderWidth: 0, hoverOffset: 4 }] },
+    options: {
+      responsive: false, cutout: '68%',
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${fmt(ctx.raw)} (${(ctx.raw/total*100).toFixed(0)}%)` } }
+      }
+    }
+  });
+
+  legend.innerHTML = entries.slice(0, 6).map(([k, v]) => `
+    <div style="display:flex;align-items:center;gap:5px">
+      <div style="width:8px;height:8px;border-radius:50%;background:${colorFor(k)};flex-shrink:0"></div>
+      <span style="color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${k}</span>
+      <span style="font-weight:600;white-space:nowrap">${(v/total*100).toFixed(0)}%</span>
+    </div>`).join('');
+}
+
+// ── Nettovermögen-Verlauf ──────────────────────────────────────────────────
+function saveNetworthSnapshot() {
+  const today = new Date().toISOString().slice(0, 10);
+  const nw = netWorth();
+  const idx = state.networthHistory.findIndex(h => h.date === today);
+  if (idx >= 0) state.networthHistory[idx].networth = nw;
+  else state.networthHistory.push({ date: today, networth: nw });
+  state.networthHistory.sort((a, b) => a.date.localeCompare(b.date));
+  saveState();
+  renderNetworthHistoryChart();
+  toast('Snapshot gespeichert ✓');
+}
+
+function renderNetworthHistoryChart() {
+  const container = el('dash-nw-history');
+  if (!container) return;
+  const history = state.networthHistory;
+  if (!history?.length) {
+    container.innerHTML = '<div style="font-size:13px;color:var(--text2)">Klicke "+ Snapshot" um den heutigen Stand zu speichern.</div>';
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="chart-wrap" style="height:150px"><canvas id="nw-hist-canvas"></canvas></div>
+    <div style="font-size:11px;color:var(--text2);margin-top:6px;text-align:right">${history.length} Snapshots · Letzter: ${fmt(history[history.length-1].networth)}</div>`;
+
+  setTimeout(() => {
+    const canvas = el('nw-hist-canvas');
+    if (!canvas) return;
+    if (nwHistChartInst) nwHistChartInst.destroy();
+    nwHistChartInst = new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels: history.map(h => new Date(h.date).toLocaleDateString('de-CH', { month: 'short', year: '2-digit' })),
+        datasets: [{ label: 'Nettovermögen', data: history.map(h => h.networth),
+          borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,.12)',
+          fill: true, tension: .4, pointRadius: 3, borderWidth: 2, pointBackgroundColor: '#6366f1' }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false },
+          tooltip: { backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
+            callbacks: { label: ctx => ' ' + fmt(ctx.parsed.y) } } },
+        scales: {
+          x: { ticks: { color: '#475569', font: { size: 10 } }, grid: { color: '#1e293b' } },
+          y: { ticks: { color: '#475569', font: { size: 10 }, callback: v => fmtK(v) }, grid: { color: '#273549' } }
+        }
+      }
+    });
+  }, 0);
+}
 
 function renderProjectionChart() {
   const canvas = el('projection-chart');
   if (!canvas) return;
-
-  const months = 60;
-  const labels = [], balData = [], invData = [], totalData = [];
+  const months = 60, labels = [], balData = [], invData = [], totalData = [];
   let bal = totalAccounts(), inv = state.portfolioValue;
-  const sav = Math.max(0, monthlySavings());
-  const pmt = totalInvestments();
-  const r   = weightedReturn() / 100 / 12;
-  const inf = (state.settings.inflationRate || 2) / 100 / 12;
+  const sav = Math.max(0, monthlySavings()), pmt = totalInvestments();
+  const r = weightedReturn() / 100 / 12, inf = (state.settings.inflationRate || 2) / 100 / 12;
   const now = new Date();
-
   for (let m = 0; m <= months; m++) {
     const d = new Date(now.getFullYear(), now.getMonth() + m, 1);
     labels.push(m % 6 === 0 ? d.toLocaleDateString('de-CH', { month: 'short', year: '2-digit' }) : '');
-    bal += sav;
-    inv  = inv * (1 + r) + pmt;
+    bal += sav; inv = inv * (1 + r) + pmt;
     const adj = chartMode === 'real' ? Math.pow(1 + inf, m) : 1;
-    balData.push(Math.round(bal / adj));
-    invData.push(Math.round(inv / adj));
-    totalData.push(Math.round((bal + inv) / adj));
+    balData.push(Math.round(bal / adj)); invData.push(Math.round(inv / adj)); totalData.push(Math.round((bal + inv) / adj));
   }
-
   if (projectionChart) projectionChart.destroy();
   projectionChart = new Chart(canvas, {
     type: 'line',
-    data: {
-      labels,
-      datasets: [
-        { label: 'Konto',      data: balData,   borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,.1)',  fill: true, tension: .4, pointRadius: 0, borderWidth: 2 },
-        { label: 'Depot',      data: invData,   borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,.08)', fill: true, tension: .4, pointRadius: 0, borderWidth: 2 },
-        { label: 'Gesamt',     data: totalData, borderColor: '#f59e0b', backgroundColor: 'transparent', fill: false, tension: .4, pointRadius: 0, borderWidth: 2, borderDash: [4, 3] }
-      ]
-    },
+    data: { labels, datasets: [
+      { label: 'Konto',  data: balData,   borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,.1)',  fill: true, tension: .4, pointRadius: 0, borderWidth: 2 },
+      { label: 'Depot',  data: invData,   borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,.08)', fill: true, tension: .4, pointRadius: 0, borderWidth: 2 },
+      { label: 'Gesamt', data: totalData, borderColor: '#f59e0b', backgroundColor: 'transparent', fill: false, tension: .4, pointRadius: 0, borderWidth: 2, borderDash: [4,3] }
+    ]},
     options: {
       responsive: true, maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { labels: { color: '#94a3b8', font: { size: 11 }, boxWidth: 12, padding: 10 } },
-        tooltip: {
-          backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
+        tooltip: { backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
           titleColor: '#f1f5f9', bodyColor: '#94a3b8',
-          callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.y) }
-        }
+          callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.y) } }
       },
       scales: {
         x: { ticks: { color: '#475569', font: { size: 10 }, maxRotation: 0 }, grid: { color: '#1e293b' } },
@@ -287,60 +452,109 @@ function setChartMode(mode) {
 }
 
 // ── Einkommen ──────────────────────────────────────────────────────────────
-RENDERERS.einkommen = function renderEinkommen() {
+RENDERERS.einkommen = function() {
   el('einkommen-total').textContent = fmt(totalIncome());
+  renderTaxDisplay();
   const list = el('einkommen-list');
-  if (!state.income.length) {
-    list.innerHTML = emptyState('💼', 'Noch keine Einnahmen erfasst.');
-    return;
-  }
-  list.innerHTML = state.income.map(i => listItem({
-    icon: iconFor(i.category), color: colorFor(i.category),
-    name: i.name, sub: i.category + (i.note ? ' · ' + i.note : ''),
-    amount: fmt(i.amount), amountColor: 'var(--green)',
-    id: i.id, type: 'income'
-  })).join('');
+  list.innerHTML = state.income.length
+    ? state.income.map(i => listItem({
+        icon: iconFor(i.category), color: colorFor(i.category),
+        name: i.name, sub: i.category + (i.note ? ' · ' + i.note : ''),
+        amount: fmt(i.amount), amountColor: 'var(--green)', id: i.id, type: 'income'
+      })).join('')
+    : emptyState('💼', 'Noch keine Einnahmen erfasst.');
 };
 
+function renderTaxDisplay() {
+  const display = el('tax-estimate-display');
+  if (!display) return;
+  const t = state.settings.taxEstimate;
+  if (!t) { display.innerHTML = '<div style="font-size:13px;color:var(--text2)">Tippe "Berechnen" für eine vereinfachte Steuerschätzung.</div>'; return; }
+  display.innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi-item"><div class="kpi-label">Steuern/Monat</div><div class="kpi-value red">${fmt(t.monthly)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Netto/Monat</div><div class="kpi-value green">${fmt(t.nettoMonthly)}</div></div>
+    </div>
+    <div style="font-size:11px;color:var(--text2);margin-top:8px">
+      Eff. Steuersatz: ~${t.rate.toFixed(0)}% · Kanton ${state.settings.taxCanton}
+      <button class="toggle-btn" style="margin-left:8px" onclick="openTaxCalculator()">Anpassen</button>
+    </div>`;
+}
+
 // ── Ausgaben ───────────────────────────────────────────────────────────────
-RENDERERS.ausgaben = function renderAusgaben() {
+RENDERERS.ausgaben = function() {
   el('ausgaben-total').textContent = fmt(totalExpenses());
   const dp = totalDebtPay();
   el('ausgaben-debt-row').innerHTML = dp > 0
     ? `<div class="info-row">🏦 Schuldentilgung <span>${fmt(dp)}/Mt.</span></div>` : '';
 
-  const list = el('ausgaben-list');
+  render503020('ausgaben-budget-rule');
+
   const income = totalIncome();
-  if (!state.expenses.length) {
-    list.innerHTML = emptyState('💸', 'Noch keine Ausgaben erfasst.');
-    return;
-  }
-  list.innerHTML = state.expenses.map(e => {
-    const pct = income > 0 ? (e.amount / income * 100).toFixed(0) : 0;
-    const hasLim = e.budgetLimit > 0;
-    const over = hasLim && e.amount > e.budgetLimit;
-    const bpct = hasLim ? Math.min(100, e.amount / e.budgetLimit * 100) : 0;
-    const bCls = over ? 'budget-over' : bpct > 80 ? 'budget-warn' : 'budget-ok';
-    return `
-    <div class="list-item${over ? ' item-over' : ''}">
+  const list = el('ausgaben-list');
+  list.innerHTML = state.expenses.length
+    ? state.expenses.map(e => {
+        const m = monthlyAmt(e);
+        const pct = income > 0 ? (m / income * 100).toFixed(0) : 0;
+        const hasLim = e.budgetLimit > 0;
+        const over = hasLim && m > e.budgetLimit;
+        const bpct = hasLim ? Math.min(100, m / e.budgetLimit * 100) : 0;
+        const bCls = over ? 'budget-over' : bpct > 80 ? 'budget-warn' : 'budget-ok';
+        const freqLabel = e.frequency === 'yearly'
+          ? `<span class="freq-badge">Jährlich</span>`
+          : '';
+        return `
+        <div class="list-item${over ? ' item-over' : ''}">
+          <div class="item-left">
+            <div class="item-icon" style="background:${colorFor(e.category)}22">${iconFor(e.category)}</div>
+            <div style="min-width:0">
+              <div class="item-name">${e.name} ${freqLabel}</div>
+              <div class="item-sub">${e.category} · ${pct}% Einkomm.${hasLim ? ' · Limit ' + fmt(e.budgetLimit) : ''}</div>
+              ${hasLim ? `<div class="budget-bar"><div class="budget-fill ${bCls}" style="width:${bpct}%"></div></div>` : ''}
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+            <div style="text-align:right">
+              <div class="item-amount" style="color:var(--red)">${fmt(m)}</div>
+              ${e.frequency === 'yearly' ? `<div style="font-size:10px;color:var(--text2)">${fmt(e.amount)}/Jahr</div>` : ''}
+            </div>
+            <div class="item-actions">
+              <button class="btn btn-ghost btn-icon" onclick="openEdit('expense','${e.id}')">✏️</button>
+              <button class="btn btn-danger btn-icon" onclick="deleteItem('expense','${e.id}')">🗑️</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')
+    : emptyState('💸', 'Noch keine Ausgaben erfasst.');
+
+  renderTransactions();
+};
+
+function renderTransactions() {
+  const list = el('transactions-list');
+  if (!list) return;
+  const txs = state.transactions || [];
+  if (!txs.length) { list.innerHTML = emptyState('📒', 'Noch keine einmaligen Buchungen.'); return; }
+  const sorted = [...txs].sort((a, b) => b.date.localeCompare(a.date));
+  list.innerHTML = sorted.map(t => `
+    <div class="list-item">
       <div class="item-left">
-        <div class="item-icon" style="background:${colorFor(e.category)}22">${iconFor(e.category)}</div>
+        <div class="item-icon" style="background:rgba(100,116,139,.15)">${t.type === 'income' ? '💰' : '💸'}</div>
         <div style="min-width:0">
-          <div class="item-name">${e.name}</div>
-          <div class="item-sub">${e.category} · ${pct}% Einkomm.${hasLim ? ' · Limit ' + fmt(e.budgetLimit) : ''}</div>
-          ${hasLim ? `<div class="budget-bar"><div class="budget-fill ${bCls}" style="width:${bpct}%"></div></div>` : ''}
+          <div class="item-name">${t.name}</div>
+          <div class="item-sub">${t.category || '–'} · ${new Date(t.date).toLocaleDateString('de-CH')}</div>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-        <span class="item-amount" style="color:${over ? 'var(--red)' : 'var(--red)'}">${fmt(e.amount)}</span>
+        <span class="item-amount" style="color:${t.type === 'income' ? 'var(--green)' : 'var(--red)'}">
+          ${t.type === 'income' ? '+' : '-'}${fmt(t.amount)}
+        </span>
         <div class="item-actions">
-          <button class="btn btn-ghost btn-icon" onclick="openEdit('expense','${e.id}')">✏️</button>
-          <button class="btn btn-danger btn-icon" onclick="deleteItem('expense','${e.id}')">🗑️</button>
+          <button class="btn btn-danger btn-icon" onclick="deleteItem('transaction','${t.id}')">🗑️</button>
         </div>
       </div>
-    </div>`;
-  }).join('');
-};
+    </div>`).join('');
+}
 
 // ── Vermögen (Investitionen + Schulden) ────────────────────────────────────
 RENDERERS.vermoegen = function renderVermoegen() {
@@ -415,8 +629,7 @@ function renderInvestSection() {
     ? state.investments.map(i => listItem({
         icon: iconFor(i.category), color: colorFor(i.category),
         name: i.name, sub: i.category + ' · Ø ' + (i.returnRate || 6) + '% p.a.',
-        amount: fmt(i.amount) + '/Mt.', amountColor: 'var(--blue)',
-        id: i.id, type: 'investment'
+        amount: fmt(i.amount) + '/Mt.', amountColor: 'var(--blue)', id: i.id, type: 'investment'
       })).join('')
     : emptyState('📈', 'Noch keine Investitionen erfasst.');
 }
@@ -461,10 +674,13 @@ function renderDebtSection() {
 
   // Schuldenliste
   const dlist = el('debt-list');
+  const strat = el('debt-strategy-section');
   if (!state.debts.length) {
     dlist.innerHTML = emptyState('🏦', 'Keine Schulden – sehr gut!');
     return;
   }
+  if (strat) strat.style.display = 'block';
+
   dlist.innerHTML = state.debts.map(d => {
     const months = debtPayoffMonths(d);
     const pct    = d.originalAmount > 0
@@ -497,9 +713,35 @@ function renderDebtSection() {
   }).join('');
 }
 
+function renderAccountsInVermoegen() {
+  const container = el('accounts-vermoegen-list');
+  if (!container) return;
+  if (!state.accounts.length) { container.innerHTML = emptyState('💳', 'Noch keine Konten erfasst.'); return; }
+  const typeLabel = { checking:'Girokonto', savings:'Sparkonto', depot:'Depot', other:'Sonstiges' };
+  const typeIcon  = { checking:'💳', savings:'🏦', depot:'📈', other:'💰' };
+  container.innerHTML = state.accounts.map(a => `
+    <div class="list-item" style="margin-bottom:8px">
+      <div class="item-left">
+        <div class="item-icon" style="background:rgba(99,102,241,.15)">${typeIcon[a.type] || '💳'}</div>
+        <div>
+          <div class="item-name">${a.name}</div>
+          <div class="item-sub">${typeLabel[a.type] || a.type}</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        <span class="item-amount" style="color:${a.balance >= 0 ? 'var(--green)' : 'var(--red)'}">${fmt(a.balance)}</span>
+        <div class="item-actions">
+          <button class="btn btn-ghost btn-icon" onclick="openEdit('account','${a.id}')">✏️</button>
+          <button class="btn btn-danger btn-icon" onclick="deleteItem('account','${a.id}');RENDERERS.vermoegen();RENDERERS.uebersicht()">🗑️</button>
+        </div>
+      </div>
+    </div>`).join('');
+}
+
 // ── Ziele ──────────────────────────────────────────────────────────────────
-RENDERERS.ziele = function renderZiele() {
+RENDERERS.ziele = function() {
   renderFIRE();
+  renderKaufkraft();
   renderGoals();
 };
 
@@ -613,6 +855,46 @@ function renderFIRE() {
     ${scenariosHTML}`;
 }
 
+function renderKaufkraft() {
+  const inflEl = el('inflation-display');
+  if (inflEl) inflEl.textContent = (state.settings.inflationRate || 2) + '%';
+  const lbl = el('kk-amount-label');
+  if (lbl) lbl.textContent = `Betrag (${state.currency})`;
+  updateKaufkraft();
+}
+
+function updateKaufkraft() {
+  const amount = parseFloat(el('kk-amount')?.value);
+  const years  = parseInt(el('kk-years')?.value) || 10;
+  const result = el('kk-result');
+  if (!result) return;
+  if (!amount || amount <= 0) {
+    result.innerHTML = '<div style="font-size:13px;color:var(--text2)">Betrag eingeben um die Kaufkraft zu berechnen.</div>';
+    return;
+  }
+  const inf = (state.settings.inflationRate || 2) / 100;
+  const realValue = amount / Math.pow(1 + inf, years);
+  const lossPct = (1 - realValue / amount) * 100;
+  const step = years <= 10 ? 1 : 5;
+  let rows = '';
+  for (let y = step; y <= years; y += step) {
+    const v = amount / Math.pow(1 + inf, y);
+    rows += `<div style="display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:1px solid var(--border)">
+      <span style="color:var(--text2)">In ${y} Jahr${y !== 1 ? 'en' : ''}</span>
+      <span style="font-weight:600">${fmt(v)}</span>
+      <span style="color:var(--red)">-${fmt(amount - v)}</span>
+    </div>`;
+  }
+  result.innerHTML = `
+    <div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);border-radius:var(--radius-sm);padding:12px;margin-bottom:10px">
+      <div style="font-size:12px;color:var(--text2)">Kaufkraftverlust nach ${years} Jahren</div>
+      <div style="font-size:26px;font-weight:800;color:var(--red)">-${lossPct.toFixed(1)}%</div>
+      <div style="font-size:13px;margin-top:2px">${fmt(amount)} → <strong>${fmt(realValue)}</strong></div>
+    </div>
+    ${rows}
+    <div style="font-size:11px;color:var(--text2);margin-top:8px">Inflationsrate: ${state.settings.inflationRate || 2}% · Einstellbar unter ⚙️ → FIRE-Einstellungen</div>`;
+}
+
 function renderGoals() {
   const list = el('ziele-list');
   const sav  = Math.max(0, monthlySavings());
@@ -658,7 +940,6 @@ function renderGoals() {
     }
 
     const insights = goalInsights(rem, sav, etaMonths);
-
     return `
     <div class="card goal-card-new">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
@@ -693,15 +974,13 @@ function renderGoals() {
       ${insights.length ? `
       <div style="margin-top:10px">
         <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:6px">💡 Spar-Szenarien</div>
-        <div class="insight-list">
-          ${insights.map(i => `
+        <div class="insight-list">${insights.map(i => `
           <div class="insight-row">
             <span class="insight-bonus">+${i.bonus} ${state.currency}/Mt.</span>
             <span class="insight-arrow">→</span>
             <span class="insight-saving">${i.savedLabel} früher</span>
             <span class="insight-date">${i.newDate}</span>
-          </div>`).join('')}
-        </div>
+          </div>`).join('')}</div>
       </div>` : ''}
     </div>`;
   });
@@ -711,28 +990,20 @@ function renderGoals() {
 
 function goalInsights(remaining, savingsPerMonth, currentMonths) {
   if (!currentMonths || remaining <= 0) return [];
-  const bonuses = [50, 100, 200, 500, 1000, 2000];
-  const insights = [];
+  const bonuses = [50,100,200,500,1000,2000], insights = [];
   for (const bonus of bonuses) {
     const newSav = savingsPerMonth + bonus;
     const newMonths = Math.ceil(remaining / newSav);
     const saved = currentMonths - newMonths;
     if (saved < 1) continue;
-    const newDate = new Date();
-    newDate.setMonth(newDate.getMonth() + newMonths);
-    insights.push({
-      bonus,
-      savedLabel: formatETA(saved),
-      newDate: newDate.toLocaleDateString('de-CH', { month: 'short', year: 'numeric' })
-    });
+    const d = new Date(); d.setMonth(d.getMonth() + newMonths);
+    insights.push({ bonus, savedLabel: formatETA(saved), newDate: d.toLocaleDateString('de-CH', { month: 'short', year: 'numeric' }) });
     if (insights.length >= 4) break;
   }
   return insights;
 }
 
-// ── Hilfsfunktionen für Rendering ──────────────────────────────────────────
-function el(id) { return document.getElementById(id); }
-
+// ── Hilfs-Render ───────────────────────────────────────────────────────────
 function emptyState(emoji, text) {
   return `<div class="empty"><div class="emoji">${emoji}</div><p>${text}</p></div>`;
 }
@@ -742,10 +1013,7 @@ function listItem({ icon, color, name, sub, amount, amountColor, id, type }) {
   <div class="list-item">
     <div class="item-left">
       <div class="item-icon" style="background:${color}22">${icon}</div>
-      <div>
-        <div class="item-name">${name}</div>
-        <div class="item-sub">${sub}</div>
-      </div>
+      <div><div class="item-name">${name}</div><div class="item-sub">${sub}</div></div>
     </div>
     <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
       <span class="item-amount" style="color:${amountColor}">${amount}</span>
@@ -759,7 +1027,7 @@ function listItem({ icon, color, name, sub, amount, amountColor, id, type }) {
 
 // ── Löschen ────────────────────────────────────────────────────────────────
 function deleteItem(type, id) {
-  const map = { income:'income', expense:'expenses', investment:'investments', debt:'debts', goal:'goals', account:'accounts' };
+  const map = { income:'income', expense:'expenses', investment:'investments', debt:'debts', goal:'goals', account:'accounts', transaction:'transactions' };
   const key = map[type];
   if (!key) return;
   state[key] = state[key].filter(x => x.id !== id);
@@ -797,7 +1065,7 @@ function openAccountsModal() {
             <div class="list-item" style="margin-bottom:8px">
               <div class="item-left">
                 <div class="item-icon" style="background:rgba(99,102,241,.15)">
-                  ${a.type === 'savings' ? '🏦' : a.type === 'depot' ? '📈' : '💳'}
+                  ${{ checking:'💳', savings:'🏦', depot:'📈', other:'💰' }[a.type] || '💳'}
                 </div>
                 <div>
                   <div class="item-name">${a.name}</div>
@@ -806,27 +1074,29 @@ function openAccountsModal() {
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
                 <span class="item-amount">${fmt(a.balance)}</span>
-                <button class="btn btn-ghost btn-icon" onclick="closeModal();editContext={type:'account',id:'${a.id}'};openAccountItemModal(${JSON.stringify(a).split('"').join("'")})">✏️</button>
+                <button class="btn btn-ghost btn-icon" onclick="closeModal();editContext={type:'account',id:'${a.id}'};openAccountItemModal(state.accounts.find(x=>x.id==='${a.id}'))">✏️</button>
                 <button class="btn btn-danger btn-icon" onclick="deleteItem('account','${a.id}');closeModal();openAccountsModal()">🗑️</button>
               </div>
             </div>`).join('')
           : emptyState('💳', 'Noch keine Konten erfasst.')}
       </div>
-      <button class="add-btn" style="margin:8px 0" onclick="closeModal();openAccountItemModal()">+ Konto hinzufügen</button>
+      <div style="display:flex;gap:8px;margin:8px 0">
+        <button class="add-btn" style="flex:1" onclick="closeModal();openAccountItemModal()">+ Konto</button>
+        ${state.accounts.length >= 2 ? `<button class="add-btn" style="flex:1;color:var(--primary-light);border-color:rgba(99,102,241,.4)" onclick="closeModal();openTransferModal()">↔ Überweisung</button>` : ''}
+      </div>
       <button class="btn btn-ghost btn-full" style="margin-top:4px" onclick="closeModal()">Schliessen</button>
     </div>
   </div>`);
 }
 
 function openAccountItemModal(prefill = null) {
-  if (prefill && typeof prefill === 'string') { try { prefill = JSON.parse(prefill.split("'").join('"')); } catch {} }
   if (!editContext && prefill?.id) editContext = { type: 'account', id: prefill.id };
   showModal(`
   <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
     <div class="modal">
       <div class="modal-title">${prefill ? 'Konto bearbeiten' : 'Konto hinzufügen'}</div>
       <div class="field"><label>Bezeichnung</label>
-        <input id="m-name" type="text" placeholder="z.B. Girokonto" value="${prefill?.name || ''}">
+        <input id="m-name" type="text" placeholder="z.B. Sparkonto Migros Bank" value="${prefill?.name || ''}">
       </div>
       <div class="field"><label>Kontotyp</label>
         <select id="m-type">
@@ -858,7 +1128,47 @@ function saveAccount() {
     state.accounts.push({ id: uid(), name, type, balance });
   }
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.uebersicht();
+  RENDERERS.uebersicht(); RENDERERS.vermoegen?.();
+}
+
+// ── Überweisung ────────────────────────────────────────────────────────────
+function openTransferModal() {
+  if (state.accounts.length < 2) { toast('Mindestens 2 Konten für eine Überweisung nötig'); return; }
+  const opts = state.accounts.map(a => `<option value="${a.id}">${a.name} (${fmt(a.balance)})</option>`).join('');
+  const opts2 = state.accounts.map((a, i) => `<option value="${a.id}" ${i === 1 ? 'selected' : ''}>${a.name} (${fmt(a.balance)})</option>`).join('');
+  showModal(`
+  <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
+    <div class="modal">
+      <div class="modal-title">↔ Überweisung zwischen Konten</div>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:14px">Verschiebe Geld zwischen deinen Konten. Keine echte Banküberweisung.</div>
+      <div class="field"><label>Von Konto</label><select id="m-from">${opts}</select></div>
+      <div class="field"><label>Auf Konto</label><select id="m-to">${opts2}</select></div>
+      <div class="field"><label>Betrag (${state.currency})</label>
+        <input id="m-transfer-amount" type="number" inputmode="decimal" placeholder="0">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
+        <button class="btn btn-primary" onclick="executeTransfer()">Überweisen ✓</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+function executeTransfer() {
+  const fromId = el('m-from')?.value;
+  const toId   = el('m-to')?.value;
+  const amount = parseFloat(el('m-transfer-amount')?.value) || 0;
+  if (fromId === toId) { toast('Gleiche Konten gewählt'); return; }
+  if (amount <= 0)     { toast('Betrag angeben'); return; }
+  const from = state.accounts.find(a => a.id === fromId);
+  const to   = state.accounts.find(a => a.id === toId);
+  if (!from || !to) return;
+  from.balance -= amount;
+  to.balance   += amount;
+  saveState();
+  closeModal();
+  toast(`${fmt(amount)} von "${from.name}" → "${to.name}" ✓`);
+  RENDERERS.vermoegen(); RENDERERS.uebersicht();
 }
 
 // ── Einkommen Modal ────────────────────────────────────────────────────────
@@ -891,16 +1201,11 @@ function openIncomeModal(prefill = null) {
 }
 
 function saveIncome() {
-  const name     = el('m-name')?.value.trim();
-  const amount   = parseFloat(el('m-amount')?.value);
-  const category = el('m-cat')?.value;
-  const note     = el('m-note')?.value.trim();
+  const name = el('m-name')?.value.trim(), amount = parseFloat(el('m-amount')?.value);
+  const category = el('m-cat')?.value, note = el('m-note')?.value.trim();
   if (!name || isNaN(amount) || amount <= 0) { toast('Name und Betrag angeben'); return; }
-  if (editContext) {
-    Object.assign(state.income.find(x => x.id === editContext.id), { name, amount, category, note });
-  } else {
-    state.income.push({ id: uid(), name, amount, category, note });
-  }
+  if (editContext) { Object.assign(state.income.find(x => x.id === editContext.id), { name, amount, category, note }); }
+  else { state.income.push({ id: uid(), name, amount, category, note }); }
   saveState(); closeModal(); toast('Gespeichert ✓');
   RENDERERS.einkommen(); RENDERERS.uebersicht();
 }
@@ -917,18 +1222,23 @@ function openExpenseModal(prefill = null) {
       <div class="field"><label>Bezeichnung</label>
         <input id="m-name" type="text" placeholder="z.B. Miete" value="${prefill?.name || ''}">
       </div>
-      <div class="field"><label>Betrag pro Monat (${state.currency})</label>
-        <input id="m-amount" type="number" inputmode="decimal" placeholder="0" value="${prefill?.amount || ''}">
-      </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
-          ${EXPENSE_CATS.map(c =>
-            `<option value="${c}" ${prefill?.category === c ? 'selected' : ''}>${iconFor(c)} ${c}</option>`).join('')}
+          ${EXPENSE_CATS.map(c => `<option value="${c}" ${prefill?.category === c ? 'selected' : ''}>${iconFor(c)} ${c}</option>`).join('')}
         </select>
+      </div>
+      <div class="field"><label>Häufigkeit</label>
+        <select id="m-freq">
+          <option value="monthly" ${prefill?.frequency !== 'yearly' ? 'selected' : ''}>📅 Monatlich</option>
+          <option value="yearly"  ${prefill?.frequency === 'yearly'  ? 'selected' : ''}>📆 Jährlich (wird auf Monate umgerechnet)</option>
+        </select>
+      </div>
+      <div class="field"><label id="m-amount-label">Betrag (${state.currency})</label>
+        <input id="m-amount" type="number" inputmode="decimal" placeholder="0" value="${prefill?.amount || ''}" oninput="updateExpenseAmountLabel()">
+        <div id="m-amount-hint" style="font-size:12px;color:var(--text2);margin-top:4px"></div>
       </div>
       <div class="field"><label>Budget-Limit/Monat (${state.currency}, optional)</label>
         <input id="m-limit" type="number" inputmode="decimal" placeholder="0 = kein Limit" value="${prefill?.budgetLimit || ''}">
-        <div style="font-size:12px;color:var(--text2);margin-top:4px">Zeigt Warnung wenn Betrag das Limit übersteigt</div>
       </div>
       <div class="field"><label>Notiz (optional)</label>
         <input id="m-note" type="text" value="${prefill?.note || ''}">
@@ -939,22 +1249,88 @@ function openExpenseModal(prefill = null) {
       </div>
     </div>
   </div>`);
+  setTimeout(updateExpenseAmountLabel, 0);
+}
+
+function updateExpenseAmountLabel() {
+  const freq = el('m-freq')?.value;
+  const amount = parseFloat(el('m-amount')?.value) || 0;
+  const hint = el('m-amount-hint');
+  const label = el('m-amount-label');
+  if (!hint || !label) return;
+  if (freq === 'yearly') {
+    label.textContent = `Betrag pro Jahr (${state.currency})`;
+    hint.textContent = amount > 0 ? `= ${fmt(amount / 12)} pro Monat` : 'Jährlicher Betrag – wird durch 12 geteilt';
+  } else {
+    label.textContent = `Betrag pro Monat (${state.currency})`;
+    hint.textContent = '';
+  }
 }
 
 function saveExpense() {
   const name        = el('m-name')?.value.trim();
   const amount      = parseFloat(el('m-amount')?.value);
   const category    = el('m-cat')?.value;
+  const frequency   = el('m-freq')?.value || 'monthly';
   const budgetLimit = parseFloat(el('m-limit')?.value) || 0;
   const note        = el('m-note')?.value.trim();
   if (!name || isNaN(amount) || amount <= 0) { toast('Name und Betrag angeben'); return; }
   if (editContext) {
-    Object.assign(state.expenses.find(x => x.id === editContext.id), { name, amount, category, budgetLimit, note });
+    Object.assign(state.expenses.find(x => x.id === editContext.id), { name, amount, category, frequency, budgetLimit, note });
   } else {
-    state.expenses.push({ id: uid(), name, amount, category, budgetLimit, note });
+    state.expenses.push({ id: uid(), name, amount, category, frequency, budgetLimit, note });
   }
   saveState(); closeModal(); toast('Gespeichert ✓');
   RENDERERS.ausgaben(); RENDERERS.uebersicht();
+}
+
+// ── Einmalige Buchung Modal ────────────────────────────────────────────────
+function openTransactionModal() {
+  const today = new Date().toISOString().slice(0, 10);
+  showModal(`
+  <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
+    <div class="modal">
+      <div class="modal-title">📝 Einmalige Buchung</div>
+      <div class="field"><label>Bezeichnung</label>
+        <input id="m-name" type="text" placeholder="z.B. Zahnarzt, Bonus">
+      </div>
+      <div class="field"><label>Typ</label>
+        <select id="m-tx-type">
+          <option value="expense">💸 Ausgabe</option>
+          <option value="income">💰 Einnahme</option>
+        </select>
+      </div>
+      <div class="field"><label>Betrag (${state.currency})</label>
+        <input id="m-amount" type="number" inputmode="decimal" placeholder="0">
+      </div>
+      <div class="field"><label>Kategorie</label>
+        <select id="m-cat">
+          ${EXPENSE_CATS.map(c => `<option value="${c}">${iconFor(c)} ${c}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Datum</label>
+        <input id="m-date" type="date" value="${today}">
+      </div>
+      <div class="field"><label>Notiz (optional)</label>
+        <input id="m-note" type="text">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
+        <button class="btn btn-primary" onclick="saveTransaction()">Speichern</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+function saveTransaction() {
+  const name = el('m-name')?.value.trim(), type = el('m-tx-type')?.value;
+  const amount = parseFloat(el('m-amount')?.value), category = el('m-cat')?.value;
+  const date = el('m-date')?.value, note = el('m-note')?.value.trim();
+  if (!name || isNaN(amount) || amount <= 0) { toast('Name und Betrag angeben'); return; }
+  if (!state.transactions) state.transactions = [];
+  state.transactions.push({ id: uid(), name, type, amount, category, date, note });
+  saveState(); closeModal(); toast('Buchung gespeichert ✓');
+  RENDERERS.ausgaben();
 }
 
 // ── Investitions-Modal ─────────────────────────────────────────────────────
@@ -973,8 +1349,7 @@ function openInvestmentModal(prefill = null) {
       </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
-          ${INVEST_CATS.map(c =>
-            `<option value="${c}" ${prefill?.category === c ? 'selected' : ''}>${iconFor(c)} ${c}</option>`).join('')}
+          ${INVEST_CATS.map(c => `<option value="${c}" ${prefill?.category === c ? 'selected' : ''}>${iconFor(c)} ${c}</option>`).join('')}
         </select>
       </div>
       <div class="field"><label>Erwartete Rendite p.a. (%)</label>
@@ -989,16 +1364,11 @@ function openInvestmentModal(prefill = null) {
 }
 
 function saveInvestment() {
-  const name       = el('m-name')?.value.trim();
-  const amount     = parseFloat(el('m-amount')?.value);
-  const category   = el('m-cat')?.value;
-  const returnRate = parseFloat(el('m-return')?.value) || 6;
+  const name = el('m-name')?.value.trim(), amount = parseFloat(el('m-amount')?.value);
+  const category = el('m-cat')?.value, returnRate = parseFloat(el('m-return')?.value) || 6;
   if (!name || isNaN(amount) || amount <= 0) { toast('Name und Betrag angeben'); return; }
-  if (editContext) {
-    Object.assign(state.investments.find(x => x.id === editContext.id), { name, amount, category, returnRate });
-  } else {
-    state.investments.push({ id: uid(), name, amount, category, returnRate });
-  }
+  if (editContext) { Object.assign(state.investments.find(x => x.id === editContext.id), { name, amount, category, returnRate }); }
+  else { state.investments.push({ id: uid(), name, amount, category, returnRate }); }
   saveState(); closeModal(); toast('Gespeichert ✓');
   RENDERERS.vermoegen(); RENDERERS.uebersicht();
 }
@@ -1019,13 +1389,14 @@ function openPortfolioModal() {
       </div>
     </div>
   </div>`);
-  setTimeout(() => { el('m-portfolio')?.select(); }, 80);
+  setTimeout(() => el('m-portfolio')?.select(), 80);
 }
 
 function savePortfolioValue() {
   state.portfolioValue = parseFloat(el('m-portfolio')?.value) || 0;
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.vermoegen(); RENDERERS.uebersicht(); if (el('page-ziele').classList.contains('active')) RENDERERS.ziele();
+  RENDERERS.vermoegen(); RENDERERS.uebersicht();
+  if (el('page-ziele').classList.contains('active')) RENDERERS.ziele();
 }
 
 // ── Schulden-Modal ─────────────────────────────────────────────────────────
@@ -1041,8 +1412,7 @@ function openDebtModal(prefill = null) {
       </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
-          ${DEBT_CATS.map(c =>
-            `<option value="${c}" ${prefill?.category === c ? 'selected' : ''}>${iconFor(c)} ${c}</option>`).join('')}
+          ${DEBT_CATS.map(c => `<option value="${c}" ${prefill?.category === c ? 'selected' : ''}>${iconFor(c)} ${c}</option>`).join('')}
         </select>
       </div>
       <div class="field"><label>Restschuld (${state.currency})</label>
@@ -1067,21 +1437,125 @@ function openDebtModal(prefill = null) {
 }
 
 function saveDebt() {
-  const name           = el('m-name')?.value.trim();
-  const category       = el('m-cat')?.value;
+  const name            = el('m-name')?.value.trim(), category = el('m-cat')?.value;
   const remainingAmount = parseFloat(el('m-remaining')?.value) || 0;
   const originalAmount  = parseFloat(el('m-original')?.value) || remainingAmount;
   const monthlyPayment  = parseFloat(el('m-payment')?.value) || 0;
   const interestRate    = parseFloat(el('m-rate')?.value) || 0;
   if (!name || remainingAmount <= 0) { toast('Name und Restschuld angeben'); return; }
   if (editContext) {
-    Object.assign(state.debts.find(x => x.id === editContext.id),
-      { name, category, remainingAmount, originalAmount, monthlyPayment, interestRate });
+    Object.assign(state.debts.find(x => x.id === editContext.id), { name, category, remainingAmount, originalAmount, monthlyPayment, interestRate });
   } else {
     state.debts.push({ id: uid(), name, category, remainingAmount, originalAmount, monthlyPayment, interestRate });
   }
   saveState(); closeModal(); toast('Gespeichert ✓');
   RENDERERS.vermoegen(); RENDERERS.uebersicht();
+}
+
+// ── Tilgungsstrategie Modal ────────────────────────────────────────────────
+function openDebtStrategyModal() {
+  if (!state.debts.length) { toast('Keine Schulden erfasst'); return; }
+  const extra = Math.max(0, monthlySavings());
+  const avalanche = simulateDebtPayoff([...state.debts].sort((a, b) => b.interestRate - a.interestRate), extra);
+  const snowball  = simulateDebtPayoff([...state.debts].sort((a, b) => a.remainingAmount - b.remainingAmount), extra);
+  const saved = snowball.totalInterest - avalanche.totalInterest;
+
+  showModal(`
+  <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
+    <div class="modal">
+      <div class="modal-title">⚡ Tilgungsstrategie-Vergleich</div>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:14px">
+        Extrabudget: <strong style="color:var(--text)">${fmt(extra)}/Mt.</strong>
+        (freier Cashflow nach Ausgaben & Investitionen)
+      </div>
+      <div class="kpi-grid" style="margin-bottom:14px">
+        <div class="kpi-item" style="border:1px solid rgba(16,185,129,.3)">
+          <div class="kpi-label">🏔 Avalanche</div>
+          <div class="kpi-value green">${formatETA(avalanche.months)}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:3px">Zinsen: ${fmt(avalanche.totalInterest)}</div>
+        </div>
+        <div class="kpi-item" style="border:1px solid rgba(99,102,241,.3)">
+          <div class="kpi-label">⛄ Snowball</div>
+          <div class="kpi-value" style="color:var(--primary-light)">${formatETA(snowball.months)}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:3px">Zinsen: ${fmt(snowball.totalInterest)}</div>
+        </div>
+      </div>
+      <div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:var(--radius-sm);padding:12px;margin-bottom:14px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:4px">💡 Empfehlung: Avalanche</div>
+        <div style="font-size:12px;color:var(--text2)">
+          Höchsten Zinssatz zuerst tilgen spart
+          <strong style="color:var(--green)">${fmt(Math.max(0, saved))}</strong> an Zinskosten gegenüber der Snowball-Methode.
+        </div>
+      </div>
+      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Reihenfolge Avalanche (höchster Zins zuerst)</div>
+      ${[...state.debts].sort((a, b) => b.interestRate - a.interestRate).map((d, i) => `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:13px">
+          <div style="width:24px;height:24px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0">${i+1}</div>
+          <span style="flex:1">${d.name}</span>
+          <span style="color:var(--red);font-weight:600">${d.interestRate}% Zins</span>
+          <span style="color:var(--text2);font-size:11px">${fmt(d.remainingAmount)}</span>
+        </div>`).join('')}
+      <button class="btn btn-ghost btn-full" style="margin-top:6px" onclick="closeModal()">Schliessen</button>
+    </div>
+  </div>`);
+}
+
+// ── Steuer-Rechner Modal ───────────────────────────────────────────────────
+let _lastTax = null;
+
+function openTaxCalculator() {
+  const grossAnnual = Math.round(totalIncome() * 12);
+  const canton = state.settings.taxCanton || 'ZH';
+  const cantonOpts = Object.entries(CANTON_RATES)
+    .map(([k]) => `<option value="${k}" ${k === canton ? 'selected' : ''}>${k}</option>`).join('');
+
+  showModal(`
+  <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
+    <div class="modal">
+      <div class="modal-title">🧾 Steuer-Schätzung (CH)</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.5">
+        Vereinfachte Schätzung auf Basis effektiver Durchschnittssätze (inkl. Kantons- und Gemeindesteuer).
+        Ohne Gewähr – für exakte Zahlen bitte Steuerberater kontaktieren.
+      </div>
+      <div class="field"><label>Brutto-Einkommen pro Jahr (${state.currency})</label>
+        <input id="m-gross" type="number" inputmode="decimal" value="${grossAnnual}" oninput="updateTaxPreview()">
+      </div>
+      <div class="field"><label>Kanton</label>
+        <select id="m-canton" onchange="updateTaxPreview()">${cantonOpts}</select>
+      </div>
+      <div id="tax-preview" style="margin:12px 0"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Schliessen</button>
+        <button class="btn btn-primary" onclick="applyTaxEstimate()">Speichern & Anzeigen</button>
+      </div>
+    </div>
+  </div>`);
+  setTimeout(updateTaxPreview, 0);
+}
+
+function updateTaxPreview() {
+  const gross  = parseFloat(el('m-gross')?.value) || 0;
+  const canton = el('m-canton')?.value || 'ZH';
+  const preview = el('tax-preview');
+  if (!preview) return;
+  if (!gross) { preview.innerHTML = ''; return; }
+  _lastTax = { ...estimateTax(gross, canton), canton };
+  preview.innerHTML = `
+    <div class="kpi-grid" style="margin-bottom:8px">
+      <div class="kpi-item"><div class="kpi-label">Steuern/Jahr</div><div class="kpi-value red">${fmt(_lastTax.yearly)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Steuern/Monat</div><div class="kpi-value red">${fmt(_lastTax.monthly)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Netto/Jahr</div><div class="kpi-value green">${fmt(_lastTax.netto)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Netto/Monat</div><div class="kpi-value green">${fmt(_lastTax.nettoMonthly)}</div></div>
+    </div>
+    <div style="font-size:12px;color:var(--text2)">Eff. Steuersatz: ~${_lastTax.rate.toFixed(0)}% · Kanton ${canton}</div>`;
+}
+
+function applyTaxEstimate() {
+  if (!_lastTax) { toast('Zuerst berechnen'); return; }
+  state.settings.taxEstimate = _lastTax;
+  state.settings.taxCanton   = _lastTax.canton;
+  saveState(); closeModal(); toast('Steuer-Schätzung gespeichert ✓');
+  RENDERERS.einkommen();
 }
 
 // ── Sparziel-Modal ─────────────────────────────────────────────────────────
@@ -1125,16 +1599,11 @@ function pickGoalIcon(btn, icon) {
 }
 
 function saveGoal() {
-  const name          = el('m-name')?.value.trim();
-  const targetAmount  = parseFloat(el('m-target')?.value);
-  const currentAmount = parseFloat(el('m-current')?.value) || 0;
-  const icon          = el('m-icon')?.value || '🎯';
+  const name = el('m-name')?.value.trim(), targetAmount = parseFloat(el('m-target')?.value);
+  const currentAmount = parseFloat(el('m-current')?.value) || 0, icon = el('m-icon')?.value || '🎯';
   if (!name || isNaN(targetAmount) || targetAmount <= 0) { toast('Name und Zielbetrag angeben'); return; }
-  if (editContext) {
-    Object.assign(state.goals.find(x => x.id === editContext.id), { name, targetAmount, currentAmount, icon });
-  } else {
-    state.goals.push({ id: uid(), name, targetAmount, currentAmount, icon });
-  }
+  if (editContext) { Object.assign(state.goals.find(x => x.id === editContext.id), { name, targetAmount, currentAmount, icon }); }
+  else { state.goals.push({ id: uid(), name, targetAmount, currentAmount, icon }); }
   saveState(); closeModal(); toast('Gespeichert ✓');
   RENDERERS.ziele();
 }
@@ -1151,11 +1620,11 @@ function openFIRESettings() {
       </div>
       <div class="field"><label>Entnahmerate (%)</label>
         <input id="m-fire-rate" type="number" inputmode="decimal" min="1" max="10" step="0.5" value="${state.settings.fireWithdrawalRate}">
-        <div style="font-size:12px;color:var(--text2);margin-top:4px">Standard: 4% (Trinity-Studie, historisch sicher)</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">Standard: 4% (Trinity-Studie)</div>
       </div>
       <div class="field"><label>Inflationsrate (%)</label>
         <input id="m-inflation" type="number" inputmode="decimal" min="0" max="20" step="0.5" value="${state.settings.inflationRate}">
-        <div style="font-size:12px;color:var(--text2);margin-top:4px">Für den Realmodus des Prognose-Charts</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">Für Kaufkraft-Rechner & Realmodus</div>
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1181,8 +1650,7 @@ function openSettings() {
       <div class="modal-title">⚙️ Einstellungen</div>
       <div class="field"><label>Währung</label>
         <select id="m-currency">
-          ${['CHF','EUR','USD','GBP','JPY'].map(c =>
-            `<option ${state.currency === c ? 'selected' : ''}>${c}</option>`).join('')}
+          ${['CHF','EUR','USD','GBP','JPY'].map(c => `<option ${state.currency === c ? 'selected' : ''}>${c}</option>`).join('')}
         </select>
       </div>
       <div style="height:1px;background:var(--border);margin:14px 0"></div>
@@ -1211,215 +1679,24 @@ function saveSettings() {
 
 function exportData() {
   const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url; a.download = 'finanzplaner-backup.json'; a.click();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'finanzplaner-backup.json'; a.click();
   URL.revokeObjectURL(url); toast('Exportiert ✓');
 }
 
 function importData(e) {
-  const file = e.target.files?.[0];
-  if (!file) return;
+  const file = e.target.files?.[0]; if (!file) return;
   const reader = new FileReader();
   reader.onload = ev => {
-    try {
-      state = migrateState(JSON.parse(ev.target.result));
-      saveState(); closeModal(); toast('Importiert ✓'); navigate('uebersicht');
-    } catch { toast('Fehler beim Importieren'); }
+    try { state = migrateState(JSON.parse(ev.target.result)); saveState(); closeModal(); toast('Importiert ✓'); navigate('uebersicht'); }
+    catch { toast('Fehler beim Importieren'); }
   };
   reader.readAsText(file);
 }
 
 function resetData() {
-  if (!confirm('Wirklich alle Daten löschen? Diese Aktion kann nicht rückgängig gemacht werden.')) return;
+  if (!confirm('Wirklich alle Daten löschen? Nicht rückgängig machbar.')) return;
   state = migrateState(null); saveState(); closeModal(); toast('Daten gelöscht'); navigate('uebersicht');
-}
-
-// ── Portfolio-Upload ───────────────────────────────────────────────────────
-let depotChart = null;
-
-function handlePortfolioUpload(event) {
-  const file = event.target.files?.[0];
-  if (!file) return;
-  const isExcel = /\.(xlsx|xls|ods)$/i.test(file.name);
-  const reader = new FileReader();
-
-  reader.onload = e => {
-    try {
-      let rows;
-      if (isExcel) {
-        const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-      } else {
-        // CSV
-        const text = e.target.result;
-        const sep = text.includes(';') ? ';' : ',';
-        rows = text.trim().split('\n').map(l => l.split(sep).map(v => v.trim().replace(/^["']|["']$/g, '')));
-      }
-      const parsed = processHistoryRows(rows);
-      if (parsed.length < 2) { toast('Zu wenig Daten – mind. 2 Zeilen mit Datum & Wert'); return; }
-      state.portfolioHistory = parsed;
-      state.portfolioValue = parsed[parsed.length - 1].value;
-      saveState();
-      renderDepotSection();
-      toast(`${parsed.length} Datenpunkte importiert ✓`);
-      if (el('page-vermoegen').classList.contains('active')) RENDERERS.uebersicht?.();
-    } catch (err) {
-      console.error(err);
-      toast('Datei konnte nicht gelesen werden');
-    }
-  };
-  isExcel ? reader.readAsArrayBuffer(file) : reader.readAsText(file);
-}
-
-function processHistoryRows(rows) {
-  if (!rows?.length) return [];
-  // Skip header row if first numeric column is not a number
-  let start = 0;
-  if (rows[0] && isNaN(parseFloat(String(rows[0][1]).replace(/[,\s]/g, '.')))) start = 1;
-
-  const result = [];
-  for (let i = start; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row || row.length < 2) continue;
-    const dateStr  = String(row[0]).trim();
-    const valStr   = String(row[1]).replace(/[''\s]/g, '').replace(',', '.');
-    const invStr   = row[2] ? String(row[2]).replace(/[''\s]/g, '').replace(',', '.') : '';
-    const value    = parseFloat(valStr);
-    const invested = parseFloat(invStr) || 0;
-    if (isNaN(value) || value <= 0) continue;
-    const date = parseFlexDate(dateStr);
-    if (!date) continue;
-    result.push({ date, value, invested });
-  }
-  return result.sort((a, b) => new Date(a.date) - new Date(b.date));
-}
-
-function parseFlexDate(s) {
-  if (!s) return null;
-  s = s.trim();
-  const de  = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
-  if (de)  return `${de[3]}-${de[2].padStart(2,'0')}-${de[1].padStart(2,'0')}`;
-  const de2 = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2})$/);
-  if (de2) return `20${de2[3]}-${de2[2].padStart(2,'0')}-${de2[1].padStart(2,'0')}`;
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  if (/^\d{4}-\d{2}$/.test(s))      return s + '-01';
-  const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (us)  return `${us[3]}-${us[1].padStart(2,'0')}-${us[2].padStart(2,'0')}`;
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
-}
-
-function renderDepotSection() {
-  const section = el('depot-chart-section');
-  if (!section) return;
-  const history = state.portfolioHistory;
-  if (!history?.length) { section.style.display = 'none'; return; }
-  section.style.display = 'block';
-
-  const first = history[0];
-  const last  = history[history.length - 1];
-  const hasInv = history.some(h => h.invested > 0);
-  const base  = hasInv ? (last.invested || first.value) : first.value;
-  const gain  = last.value - base;
-  const gainPct = base > 0 ? gain / base * 100 : 0;
-  const isPos = gain >= 0;
-
-  // Key stats
-  const msApart = new Date(last.date) - new Date(first.date);
-  const years   = msApart / (1000 * 60 * 60 * 24 * 365.25);
-  const paReturn = years > 0.08 ? ((Math.pow(last.value / (base || 1), 1 / years) - 1) * 100) : gainPct;
-
-  // Max drawdown
-  let maxDD = 0, peak = history[0].value;
-  for (const h of history) {
-    if (h.value > peak) peak = h.value;
-    const dd = peak > 0 ? (peak - h.value) / peak * 100 : 0;
-    if (dd > maxDD) maxDD = dd;
-  }
-
-  el('depot-stats').innerHTML = `
-    <div class="depot-gain-card" style="background:${isPos ? 'rgba(16,185,129,.1)' : 'rgba(239,68,68,.1)'};border-color:${isPos ? 'rgba(16,185,129,.25)' : 'rgba(239,68,68,.25)'}">
-      <div style="font-size:12px;color:var(--text2);margin-bottom:4px">Gesamtgewinn / -verlust</div>
-      <div style="font-size:30px;font-weight:800;color:${isPos ? 'var(--green)' : 'var(--red)'}">
-        ${isPos ? '+' : ''}${fmt(gain)}
-      </div>
-      <div style="font-size:15px;font-weight:600;color:${isPos ? 'var(--green)' : 'var(--red)'};margin-top:2px">
-        ${isPos ? '▲' : '▼'} ${Math.abs(gainPct).toFixed(2)}%
-      </div>
-    </div>
-    <div class="kpi-grid" style="margin-top:10px">
-      <div class="kpi-item">
-        <div class="kpi-label">Ø Rendite p.a.</div>
-        <div class="kpi-value${paReturn >= 0 ? ' green' : ' red'}">${paReturn >= 0 ? '+' : ''}${paReturn.toFixed(1)}%</div>
-      </div>
-      <div class="kpi-item">
-        <div class="kpi-label">Max. Rückgang</div>
-        <div class="kpi-value red">-${maxDD.toFixed(1)}%</div>
-      </div>
-      <div class="kpi-item">
-        <div class="kpi-label">Startwert</div>
-        <div class="kpi-value">${fmt(first.value)}</div>
-      </div>
-      <div class="kpi-item">
-        <div class="kpi-label">Aktueller Wert</div>
-        <div class="kpi-value">${fmt(last.value)}</div>
-      </div>
-    </div>`;
-
-  // Chart
-  const labels   = history.map((h, i) => {
-    const d = new Date(h.date);
-    const skip = history.length > 60 ? Math.ceil(history.length / 12) : history.length > 24 ? 3 : 1;
-    return i % skip === 0 ? d.toLocaleDateString('de-CH', { month: 'short', year: '2-digit' }) : '';
-  });
-  const values   = history.map(h => h.value);
-  const invested = hasInv ? history.map(h => h.invested || 0) : null;
-
-  if (depotChart) depotChart.destroy();
-  const datasets = [{
-    label: 'Depotwert',
-    data: values,
-    borderColor: isPos ? '#10b981' : '#ef4444',
-    backgroundColor: isPos ? 'rgba(16,185,129,.1)' : 'rgba(239,68,68,.1)',
-    fill: true, tension: .35, pointRadius: 0, borderWidth: 2
-  }];
-  if (invested) datasets.push({
-    label: 'Eingesetzt',
-    data: invested,
-    borderColor: 'rgba(148,163,184,.5)',
-    backgroundColor: 'transparent',
-    fill: false, tension: .35, pointRadius: 0, borderWidth: 1.5, borderDash: [5, 4]
-  });
-
-  depotChart = new Chart(el('depot-chart'), {
-    type: 'line',
-    data: { labels, datasets },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { labels: { color: '#94a3b8', font: { size: 11 }, boxWidth: 12 } },
-        tooltip: {
-          backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
-          titleColor: '#f1f5f9', bodyColor: '#94a3b8',
-          callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.y) }
-        }
-      },
-      scales: {
-        x: { ticks: { color: '#475569', font: { size: 10 }, maxRotation: 0 }, grid: { color: '#1e293b' } },
-        y: { ticks: { color: '#475569', font: { size: 10 }, callback: v => fmtK(v) }, grid: { color: '#273549' } }
-      }
-    }
-  });
-}
-
-function clearPortfolioHistory() {
-  state.portfolioHistory = [];
-  saveState();
-  el('depot-chart-section').style.display = 'none';
-  toast('Upload gelöscht');
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
