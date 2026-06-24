@@ -317,3 +317,14 @@ nav {
 }
 .summary-card .s-label { font-size: 13px; color: var(--text2); }
 .summary-card .s-value { font-size: 20px; font-weight: 700; }
+
+/* ── Freq Badge ── */
+.freq-badge {
+  display: inline-block; font-size: 10px; font-weight: 700;
+  background: rgba(99,102,241,.18); color: var(--primary-light);
+  border-radius: 4px; padding: 1px 5px; vertical-align: middle;
+  letter-spacing: .3px;
+}
+
+/* ── Transfer Btn Highlight ── */
+.add-btn.transfer-btn { color: var(--primary-light); border-color: rgba(99,102,241,.4); }
