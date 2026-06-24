@@ -162,42 +162,6 @@
   <div id="page-vermoegen" class="page">
     <div class="page-header"><h1>Vermögen</h1><p>Investitionen & Schulden</p></div>
 
-    <!-- ── Depot-Upload ── -->
-    <div class="section-divider">
-      <div class="sdiv-title">📊 Depot-Analyse</div>
-      <div class="sdiv-line"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-title" style="margin-bottom:8px">Excel / CSV hochladen</div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6">
-        Exportiere deine Depot-Übersicht aus deiner Broker-App (z.B. Swissquote, IBKR, Degiro)
-        als Excel oder CSV und lade sie hier hoch.<br>
-        <strong style="color:var(--text)">Format:</strong> Spalte A = Datum, B = Depotwert, C = Eingesetzt (optional)
-      </div>
-      <label class="upload-zone" id="upload-zone">
-        <span class="upload-icon">📂</span>
-        <span class="upload-text">Excel (.xlsx) oder CSV hochladen</span>
-        <span class="upload-sub">Tippen zum Auswählen</span>
-        <input type="file" accept=".xlsx,.xls,.csv,.ods" onchange="handlePortfolioUpload(event)" style="display:none">
-      </label>
-      <div style="font-size:11px;color:var(--text2);margin-top:8px;text-align:center">
-        Alle Daten bleiben lokal auf deinem Gerät – nichts wird hochgeladen
-      </div>
-    </div>
-
-    <!-- Depot Chart + Stats (versteckt bis Upload) -->
-    <div id="depot-chart-section" style="display:none">
-      <div id="depot-stats"></div>
-      <div class="card" style="margin-top:10px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <div class="card-title" style="margin-bottom:0">Wertentwicklung</div>
-          <button class="toggle-btn" onclick="clearPortfolioHistory()" style="color:var(--red);border-color:rgba(239,68,68,.3)">✕ Löschen</button>
-        </div>
-        <div class="chart-wrap" style="height:220px"><canvas id="depot-chart"></canvas></div>
-      </div>
-    </div>
-
     <!-- ── Investitionen ── -->
     <div class="section-divider">
       <div class="sdiv-title">📈 Investitionen</div>
@@ -315,7 +279,6 @@
 
 </div><!-- /#app -->
 
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="app.js"></script>
 </body>

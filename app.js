@@ -10,7 +10,7 @@ const DEFAULT_STATE = {
   debts: [],
   goals: [],
   portfolioValue: 0,
-  portfolioHistory: [],
+
   settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0 }
 };
 
@@ -344,9 +344,6 @@ RENDERERS.ausgaben = function renderAusgaben() {
 
 // ── Vermögen (Investitionen + Schulden) ────────────────────────────────────
 RENDERERS.vermoegen = function renderVermoegen() {
-  // Depot-Upload Chart (falls vorhanden)
-  renderDepotSection();
-
   // Investitionen
   el('invest-total').textContent = fmt(totalInvestments());
   el('portfolio-display').textContent = fmt(state.portfolioValue);
@@ -1050,193 +1047,6 @@ function importData(e) {
 function resetData() {
   if (!confirm('Wirklich alle Daten löschen? Diese Aktion kann nicht rückgängig gemacht werden.')) return;
   state = migrateState(null); saveState(); closeModal(); toast('Daten gelöscht'); navigate('uebersicht');
-}
-
-// ── Portfolio-Upload ───────────────────────────────────────────────────────
-let depotChart = null;
-
-function handlePortfolioUpload(event) {
-  const file = event.target.files?.[0];
-  if (!file) return;
-  const isExcel = /\.(xlsx|xls|ods)$/i.test(file.name);
-  const reader = new FileReader();
-
-  reader.onload = e => {
-    try {
-      let rows;
-      if (isExcel) {
-        const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-      } else {
-        // CSV
-        const text = e.target.result;
-        const sep = text.includes(';') ? ';' : ',';
-        rows = text.trim().split('\n').map(l => l.split(sep).map(v => v.trim().replace(/^["']|["']$/g, '')));
-      }
-      const parsed = processHistoryRows(rows);
-      if (parsed.length < 2) { toast('Zu wenig Daten – mind. 2 Zeilen mit Datum & Wert'); return; }
-      state.portfolioHistory = parsed;
-      state.portfolioValue = parsed[parsed.length - 1].value;
-      saveState();
-      renderDepotSection();
-      toast(`${parsed.length} Datenpunkte importiert ✓`);
-      if (el('page-vermoegen').classList.contains('active')) RENDERERS.uebersicht?.();
-    } catch (err) {
-      console.error(err);
-      toast('Datei konnte nicht gelesen werden');
-    }
-  };
-  isExcel ? reader.readAsArrayBuffer(file) : reader.readAsText(file);
-}
-
-function processHistoryRows(rows) {
-  if (!rows?.length) return [];
-  // Skip header row if first numeric column is not a number
-  let start = 0;
-  if (rows[0] && isNaN(parseFloat(String(rows[0][1]).replace(/[,\s]/g, '.')))) start = 1;
-
-  const result = [];
-  for (let i = start; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row || row.length < 2) continue;
-    const dateStr  = String(row[0]).trim();
-    const valStr   = String(row[1]).replace(/[''\s]/g, '').replace(',', '.');
-    const invStr   = row[2] ? String(row[2]).replace(/[''\s]/g, '').replace(',', '.') : '';
-    const value    = parseFloat(valStr);
-    const invested = parseFloat(invStr) || 0;
-    if (isNaN(value) || value <= 0) continue;
-    const date = parseFlexDate(dateStr);
-    if (!date) continue;
-    result.push({ date, value, invested });
-  }
-  return result.sort((a, b) => new Date(a.date) - new Date(b.date));
-}
-
-function parseFlexDate(s) {
-  if (!s) return null;
-  s = s.trim();
-  const de  = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
-  if (de)  return `${de[3]}-${de[2].padStart(2,'0')}-${de[1].padStart(2,'0')}`;
-  const de2 = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2})$/);
-  if (de2) return `20${de2[3]}-${de2[2].padStart(2,'0')}-${de2[1].padStart(2,'0')}`;
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  if (/^\d{4}-\d{2}$/.test(s))      return s + '-01';
-  const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (us)  return `${us[3]}-${us[1].padStart(2,'0')}-${us[2].padStart(2,'0')}`;
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
-}
-
-function renderDepotSection() {
-  const section = el('depot-chart-section');
-  if (!section) return;
-  const history = state.portfolioHistory;
-  if (!history?.length) { section.style.display = 'none'; return; }
-  section.style.display = 'block';
-
-  const first = history[0];
-  const last  = history[history.length - 1];
-  const hasInv = history.some(h => h.invested > 0);
-  const base  = hasInv ? (last.invested || first.value) : first.value;
-  const gain  = last.value - base;
-  const gainPct = base > 0 ? gain / base * 100 : 0;
-  const isPos = gain >= 0;
-
-  // Key stats
-  const msApart = new Date(last.date) - new Date(first.date);
-  const years   = msApart / (1000 * 60 * 60 * 24 * 365.25);
-  const paReturn = years > 0.08 ? ((Math.pow(last.value / (base || 1), 1 / years) - 1) * 100) : gainPct;
-
-  // Max drawdown
-  let maxDD = 0, peak = history[0].value;
-  for (const h of history) {
-    if (h.value > peak) peak = h.value;
-    const dd = peak > 0 ? (peak - h.value) / peak * 100 : 0;
-    if (dd > maxDD) maxDD = dd;
-  }
-
-  el('depot-stats').innerHTML = `
-    <div class="depot-gain-card" style="background:${isPos ? 'rgba(16,185,129,.1)' : 'rgba(239,68,68,.1)'};border-color:${isPos ? 'rgba(16,185,129,.25)' : 'rgba(239,68,68,.25)'}">
-      <div style="font-size:12px;color:var(--text2);margin-bottom:4px">Gesamtgewinn / -verlust</div>
-      <div style="font-size:30px;font-weight:800;color:${isPos ? 'var(--green)' : 'var(--red)'}">
-        ${isPos ? '+' : ''}${fmt(gain)}
-      </div>
-      <div style="font-size:15px;font-weight:600;color:${isPos ? 'var(--green)' : 'var(--red)'};margin-top:2px">
-        ${isPos ? '▲' : '▼'} ${Math.abs(gainPct).toFixed(2)}%
-      </div>
-    </div>
-    <div class="kpi-grid" style="margin-top:10px">
-      <div class="kpi-item">
-        <div class="kpi-label">Ø Rendite p.a.</div>
-        <div class="kpi-value${paReturn >= 0 ? ' green' : ' red'}">${paReturn >= 0 ? '+' : ''}${paReturn.toFixed(1)}%</div>
-      </div>
-      <div class="kpi-item">
-        <div class="kpi-label">Max. Rückgang</div>
-        <div class="kpi-value red">-${maxDD.toFixed(1)}%</div>
-      </div>
-      <div class="kpi-item">
-        <div class="kpi-label">Startwert</div>
-        <div class="kpi-value">${fmt(first.value)}</div>
-      </div>
-      <div class="kpi-item">
-        <div class="kpi-label">Aktueller Wert</div>
-        <div class="kpi-value">${fmt(last.value)}</div>
-      </div>
-    </div>`;
-
-  // Chart
-  const labels   = history.map((h, i) => {
-    const d = new Date(h.date);
-    const skip = history.length > 60 ? Math.ceil(history.length / 12) : history.length > 24 ? 3 : 1;
-    return i % skip === 0 ? d.toLocaleDateString('de-CH', { month: 'short', year: '2-digit' }) : '';
-  });
-  const values   = history.map(h => h.value);
-  const invested = hasInv ? history.map(h => h.invested || 0) : null;
-
-  if (depotChart) depotChart.destroy();
-  const datasets = [{
-    label: 'Depotwert',
-    data: values,
-    borderColor: isPos ? '#10b981' : '#ef4444',
-    backgroundColor: isPos ? 'rgba(16,185,129,.1)' : 'rgba(239,68,68,.1)',
-    fill: true, tension: .35, pointRadius: 0, borderWidth: 2
-  }];
-  if (invested) datasets.push({
-    label: 'Eingesetzt',
-    data: invested,
-    borderColor: 'rgba(148,163,184,.5)',
-    backgroundColor: 'transparent',
-    fill: false, tension: .35, pointRadius: 0, borderWidth: 1.5, borderDash: [5, 4]
-  });
-
-  depotChart = new Chart(el('depot-chart'), {
-    type: 'line',
-    data: { labels, datasets },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { labels: { color: '#94a3b8', font: { size: 11 }, boxWidth: 12 } },
-        tooltip: {
-          backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
-          titleColor: '#f1f5f9', bodyColor: '#94a3b8',
-          callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.y) }
-        }
-      },
-      scales: {
-        x: { ticks: { color: '#475569', font: { size: 10 }, maxRotation: 0 }, grid: { color: '#1e293b' } },
-        y: { ticks: { color: '#475569', font: { size: 10 }, callback: v => fmtK(v) }, grid: { color: '#273549' } }
-      }
-    }
-  });
-}
-
-function clearPortfolioHistory() {
-  state.portfolioHistory = [];
-  saveState();
-  el('depot-chart-section').style.display = 'none';
-  toast('Upload gelöscht');
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
