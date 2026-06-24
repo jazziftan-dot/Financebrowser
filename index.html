@@ -186,18 +186,44 @@
        VERMÖGEN
   ══════════════════════════════════════════════════════════════ -->
   <div id="page-vermoegen" class="page">
-    <div class="page-header"><h1>Vermögen</h1><p>Konten, Investitionen & Schulden</p></div>
+    <div class="page-header"><h1>Vermögen</h1><p>Investitionen, Depot & Schulden</p></div>
 
-    <!-- Konten & Guthaben -->
+    <!-- Nettovermögen Übersicht -->
+    <div id="vermoegen-summary"></div>
+
+    <!-- ── Depot-Analyse ── -->
     <div class="section-divider">
       <div class="sdiv-title">💳 Konten & Guthaben</div>
       <div class="sdiv-line"></div>
     </div>
-    <div class="card" style="margin-bottom:10px">
-      <div id="accounts-vermoegen-list"></div>
-      <div style="display:flex;gap:8px;margin-top:10px">
-        <button class="add-btn" style="flex:1" onclick="openAccountItemModal()">+ Konto</button>
-        <button class="add-btn" style="flex:1;color:var(--primary-light);border-color:rgba(99,102,241,.4)" onclick="openTransferModal()">↔ Überweisung</button>
+
+    <div class="card">
+      <div class="card-title" style="margin-bottom:8px">Excel / CSV hochladen</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6">
+        Exportiere deine Depot-Übersicht aus deiner Broker-App (z.B. Swissquote, IBKR, Degiro)
+        als Excel oder CSV und lade sie hier hoch.<br>
+        <strong style="color:var(--text)">Format:</strong> Spalte A = Datum · B = Depotwert · C = Eingesetzt (optional)
+      </div>
+      <label class="upload-zone" id="upload-zone">
+        <span class="upload-icon">📂</span>
+        <span class="upload-text">Excel (.xlsx) oder CSV hochladen</span>
+        <span class="upload-sub">Tippen zum Auswählen</span>
+        <input type="file" accept=".xlsx,.xls,.csv,.ods" onchange="handlePortfolioUpload(event)" style="display:none">
+      </label>
+      <div style="font-size:11px;color:var(--text2);margin-top:8px;text-align:center">
+        Alle Daten bleiben lokal auf deinem Gerät – nichts wird hochgeladen
+      </div>
+    </div>
+
+    <!-- Depot Chart + Stats (versteckt bis Upload) -->
+    <div id="depot-chart-section" style="display:none">
+      <div id="depot-stats"></div>
+      <div class="card" style="margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div class="card-title" style="margin-bottom:0">Wertentwicklung</div>
+          <button class="toggle-btn" onclick="clearPortfolioHistory()" style="color:var(--red);border-color:rgba(239,68,68,.3)">✕ Löschen</button>
+        </div>
+        <div class="chart-wrap" style="height:220px"><canvas id="depot-chart"></canvas></div>
       </div>
     </div>
 
@@ -207,25 +233,30 @@
       <div class="sdiv-line"></div>
     </div>
     <div class="card" style="margin-bottom:10px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
-          <div class="card-title" style="margin-bottom:2px">Monatlich</div>
-          <div style="font-size:22px;font-weight:700;color:var(--blue)" id="invest-total">0</div>
+          <div class="card-title" style="margin-bottom:2px">Monatlich investiert</div>
+          <div style="font-size:24px;font-weight:700;color:var(--blue)" id="invest-total">0</div>
         </div>
-        <div>
-          <div class="card-title" style="margin-bottom:2px;text-align:right">Depotwert heute</div>
+        <div style="text-align:right">
+          <div class="card-title" style="margin-bottom:2px">Depotwert heute</div>
           <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
-            <div style="font-size:22px;font-weight:700;color:var(--green)" id="portfolio-display">0 CHF</div>
-            <button class="btn btn-ghost btn-icon" onclick="openPortfolioModal()">✏️</button>
+            <div style="font-size:24px;font-weight:700;color:var(--green)" id="portfolio-display">0 CHF</div>
+            <button class="btn btn-ghost btn-icon" onclick="openPortfolioModal()" title="Depotwert bearbeiten">✏️</button>
           </div>
         </div>
       </div>
+      <!-- Aufteilung nach Kategorie -->
+      <div id="invest-alloc-section"></div>
     </div>
     <div class="item-list" id="invest-list"></div>
     <div style="margin-top:8px"><button class="add-btn" onclick="openInvestmentModal()">+ Investition hinzufügen</button></div>
     <div class="card" style="margin-top:12px">
       <div class="card-title">Hinweis zur Rendite</div>
-      <div style="font-size:12px;color:var(--text2);line-height:1.6">Historisch ca. 7–10% p.a. für globale ETFs. Vergangene Renditen sind keine Garantie für die Zukunft.</div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.6">
+        Historisch ca. 7–10% p.a. für globale ETFs. Vergangene Renditen sind keine Garantie für die Zukunft.
+        Krypto und Einzelaktien können stark schwanken.
+      </div>
     </div>
 
     <!-- Schulden -->
@@ -234,10 +265,18 @@
       <div class="sdiv-line"></div>
     </div>
     <div class="card" style="margin-bottom:10px">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div><div class="card-title" style="margin-bottom:2px">Restschuld</div><div style="font-size:22px;font-weight:700;color:var(--red)" id="debt-total">0</div></div>
-        <div><div class="card-title" style="margin-bottom:2px">Rate/Mt.</div><div style="font-size:22px;font-weight:700;color:var(--orange)" id="debt-pay-total">0</div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+        <div>
+          <div class="card-title" style="margin-bottom:2px">Restschuld gesamt</div>
+          <div style="font-size:22px;font-weight:700;color:var(--red)" id="debt-total">0</div>
+        </div>
+        <div>
+          <div class="card-title" style="margin-bottom:2px">Rate / Monat</div>
+          <div style="font-size:22px;font-weight:700;color:var(--orange)" id="debt-pay-total">0</div>
+        </div>
       </div>
+      <!-- Tilgungsstrategie -->
+      <div id="debt-strategy"></div>
     </div>
     <div class="item-list" id="debt-list"></div>
     <div style="margin-top:8px"><button class="add-btn" onclick="openDebtModal()">+ Schuld hinzufügen</button></div>
@@ -263,7 +302,7 @@
        ZIELE
   ══════════════════════════════════════════════════════════════ -->
   <div id="page-ziele" class="page">
-    <div class="page-header"><h1>Ziele</h1><p>FIRE, Kaufkraft & Sparziele</p></div>
+    <div class="page-header"><h1>Ziele</h1><p>Finanzielle Freiheit & Sparziele</p></div>
 
     <!-- FIRE Rechner -->
     <div class="card" id="fire-card"><div style="font-size:13px;color:var(--text2)">Lade…</div></div>
@@ -294,10 +333,17 @@
       <div class="sdiv-line"></div>
     </div>
     <div id="ziele-list"></div>
-    <div style="margin-top:4px"><button class="add-btn" onclick="openGoalModal()">+ Sparziel festlegen</button></div>
+    <div style="margin-top:8px">
+      <button class="add-btn" onclick="openGoalModal()">+ Sparziel hinzufügen</button>
+    </div>
+
     <div class="card" style="margin-top:14px">
-      <div class="card-title">So funktioniert die Zeitberechnung</div>
-      <div style="font-size:12px;color:var(--text2);line-height:1.6">Die Dauer basiert auf dem monatlich frei verfügbaren Betrag (Einkommen − Ausgaben − Investitionen − Schuldraten).</div>
+      <div class="card-title">💡 Wie funktioniert die Zeitberechnung?</div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.7">
+        Die Dauer basiert auf dem monatlich frei verfügbaren Betrag:<br>
+        <strong style="color:var(--text)">Einkommen − Ausgaben − Investitionen − Schuldraten</strong><br>
+        Je mehr du sparst, desto schneller erreichst du deine Ziele.
+      </div>
     </div>
   </div><!-- /ziele -->
 

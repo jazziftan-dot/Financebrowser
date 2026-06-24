@@ -290,14 +290,80 @@ nav {
   padding: 14px 16px; text-align: center; margin-bottom: 0;
 }
 
-/* ── Goal Cards with Insights ── */
-.goal-card-new {
+/* ── Nettovermögen Summary ── */
+.nw-summary-card { background: linear-gradient(135deg, #1a2d4f 0%, #1e3a5f 100%); border-color: #2563eb44; }
+.nw-sum-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.nw-sum-item { flex: 1; text-align: center; }
+.nw-sum-label { font-size: 11px; color: rgba(255,255,255,.55); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+.nw-sum-val { font-size: 18px; font-weight: 700; }
+.nw-sum-val.green { color: var(--green); }
+.nw-sum-val.red   { color: #f87171; }
+.nw-sum-op { font-size: 18px; font-weight: 700; color: rgba(255,255,255,.3); flex-shrink: 0; padding: 0 2px; }
+
+/* ── Investment Allocation Bar ── */
+.alloc-wrap { margin-top: 2px; }
+.alloc-bar {
+  display: flex; height: 8px; border-radius: 99px; overflow: hidden; gap: 2px; margin-bottom: 8px;
+  background: var(--surface);
+}
+.alloc-seg { height: 100%; border-radius: 99px; transition: width .4s; min-width: 4px; }
+.alloc-legend { display: flex; flex-wrap: wrap; gap: 6px; }
+.alloc-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 99px; padding: 3px 8px; font-size: 11px;
+}
+.alloc-dot  { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.alloc-cat  { color: var(--text2); }
+.alloc-pct  { font-weight: 700; color: var(--text); }
+
+/* ── Debt Strategy Box ── */
+.strat-box { border-top: 1px solid var(--border); padding-top: 10px; }
+.strat-row { display: flex; flex-direction: column; gap: 8px; }
+.strat-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: var(--surface2); border-radius: var(--radius-sm); padding: 10px 12px;
+}
+.strat-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+.strat-label { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.strat-desc  { font-size: 11px; color: var(--text2); line-height: 1.4; }
+.strat-target { font-size: 12px; color: var(--primary-light); font-weight: 600; margin-top: 3px; }
+
+/* ── FIRE Milestones ── */
+.milestone-row {
+  display: flex; justify-content: space-between; margin: 12px 0;
+  gap: 6px;
+}
+.milestone-item {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px;
+}
+.milestone-dot {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--surface2); border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: var(--text2);
+  transition: all .25s;
+}
+.ms-reached .milestone-dot {
+  background: rgba(99,102,241,.2); border-color: var(--primary);
+  color: var(--primary-light);
+}
+.milestone-pct { font-size: 11px; color: var(--text2); font-weight: 600; }
+.ms-reached .milestone-pct { color: var(--primary-light); }
+
+/* ── Goal Cards ── */
+.goal-card-new { margin-bottom: 12px; }
+.goal-card-done {
   margin-bottom: 12px;
+  background: rgba(16,185,129,.06);
+  border-color: rgba(16,185,129,.2);
 }
 .goal-eta-box {
-  background: rgba(99,102,241,.1); border: 1px solid rgba(99,102,241,.2);
-  border-radius: var(--radius-sm); padding: 10px 12px; margin-top: 0;
+  background: rgba(99,102,241,.08); border: 1px solid rgba(99,102,241,.2);
+  border-radius: var(--radius-sm); padding: 10px 12px;
 }
+
+/* ── Insights ── */
 .insight-list { display: flex; flex-direction: column; gap: 6px; }
 .insight-row {
   display: flex; align-items: center; gap: 8px;
@@ -309,7 +375,7 @@ nav {
 .insight-saving { font-weight: 600; color: var(--text); flex: 1; }
 .insight-date   { font-size: 11px; color: var(--text2); white-space: nowrap; }
 
-/* ── Summary Card ── */
+/* ── Summary Card (legacy) ── */
 .summary-card {
   background: var(--surface2); border-radius: var(--radius-sm);
   padding: 12px 14px; margin-bottom: 14px;
