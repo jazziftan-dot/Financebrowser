@@ -191,41 +191,12 @@
     <!-- Nettovermögen Übersicht -->
     <div id="vermoegen-summary"></div>
 
-    <!-- ── Depot-Analyse ── -->
+    <!-- Konten & Guthaben -->
     <div class="section-divider">
       <div class="sdiv-title">💳 Konten & Guthaben</div>
       <div class="sdiv-line"></div>
     </div>
-
-    <div class="card">
-      <div class="card-title" style="margin-bottom:8px">Excel / CSV hochladen</div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6">
-        Exportiere deine Depot-Übersicht aus deiner Broker-App (z.B. Swissquote, IBKR, Degiro)
-        als Excel oder CSV und lade sie hier hoch.<br>
-        <strong style="color:var(--text)">Format:</strong> Spalte A = Datum · B = Depotwert · C = Eingesetzt (optional)
-      </div>
-      <label class="upload-zone" id="upload-zone">
-        <span class="upload-icon">📂</span>
-        <span class="upload-text">Excel (.xlsx) oder CSV hochladen</span>
-        <span class="upload-sub">Tippen zum Auswählen</span>
-        <input type="file" accept=".xlsx,.xls,.csv,.ods" onchange="handlePortfolioUpload(event)" style="display:none">
-      </label>
-      <div style="font-size:11px;color:var(--text2);margin-top:8px;text-align:center">
-        Alle Daten bleiben lokal auf deinem Gerät – nichts wird hochgeladen
-      </div>
-    </div>
-
-    <!-- Depot Chart + Stats (versteckt bis Upload) -->
-    <div id="depot-chart-section" style="display:none">
-      <div id="depot-stats"></div>
-      <div class="card" style="margin-top:10px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <div class="card-title" style="margin-bottom:0">Wertentwicklung</div>
-          <button class="toggle-btn" onclick="clearPortfolioHistory()" style="color:var(--red);border-color:rgba(239,68,68,.3)">✕ Löschen</button>
-        </div>
-        <div class="chart-wrap" style="height:220px"><canvas id="depot-chart"></canvas></div>
-      </div>
-    </div>
+    <div id="accounts-vermoegen-list"></div>
 
     <!-- Investitionen -->
     <div class="section-divider">
@@ -246,7 +217,6 @@
           </div>
         </div>
       </div>
-      <!-- Aufteilung nach Kategorie -->
       <div id="invest-alloc-section"></div>
     </div>
     <div class="item-list" id="invest-list"></div>
@@ -275,7 +245,6 @@
           <div style="font-size:22px;font-weight:700;color:var(--orange)" id="debt-pay-total">0</div>
         </div>
       </div>
-      <!-- Tilgungsstrategie -->
       <div id="debt-strategy"></div>
     </div>
     <div class="item-list" id="debt-list"></div>
@@ -293,6 +262,41 @@
           <button class="toggle-btn" onclick="openDebtStrategyModal()">Vergleichen</button>
         </div>
         <div style="font-size:13px;color:var(--text2)">Finde die optimale Tilgungsreihenfolge und spare Zinsen.</div>
+      </div>
+    </div>
+
+    <!-- CSV / Excel Upload (ganz unten) -->
+    <div class="section-divider" style="margin-top:8px">
+      <div class="sdiv-title">📂 Depot-Import</div>
+      <div class="sdiv-line"></div>
+    </div>
+    <div class="card">
+      <div class="card-title" style="margin-bottom:8px">Excel / CSV hochladen</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6">
+        Exportiere deine Depot-Übersicht aus deiner Broker-App (z.B. Swissquote, IBKR, Degiro)
+        als Excel oder CSV und lade sie hier hoch.<br>
+        <strong style="color:var(--text)">Format:</strong> Spalte A = Datum · B = Depotwert · C = Eingesetzt (optional)
+      </div>
+      <label class="upload-zone" id="upload-zone">
+        <span class="upload-icon">📂</span>
+        <span class="upload-text">Excel (.xlsx) oder CSV hochladen</span>
+        <span class="upload-sub">Tippen zum Auswählen</span>
+        <input type="file" accept=".xlsx,.xls,.csv,.ods" onchange="handlePortfolioUpload(event)" style="display:none">
+      </label>
+      <div style="font-size:11px;color:var(--text2);margin-top:8px;text-align:center">
+        Alle Daten bleiben lokal auf deinem Gerät – nichts wird hochgeladen
+      </div>
+    </div>
+
+    <!-- Depot Chart + Stats (versteckt bis Upload) -->
+    <div id="depot-chart-section" style="display:none">
+      <div id="depot-stats"></div>
+      <div class="card" style="margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div class="card-title" style="margin-bottom:0">Wertentwicklung</div>
+          <button class="toggle-btn" onclick="clearPortfolioHistory()" style="color:var(--red);border-color:rgba(239,68,68,.3)">✕ Löschen</button>
+        </div>
+        <div class="chart-wrap" style="height:220px"><canvas id="depot-chart"></canvas></div>
       </div>
     </div>
   </div><!-- /vermoegen -->

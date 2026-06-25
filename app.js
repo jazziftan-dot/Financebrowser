@@ -558,7 +558,7 @@ function renderTransactions() {
 
 // ── Vermögen (Investitionen + Schulden) ────────────────────────────────────
 RENDERERS.vermoegen = function renderVermoegen() {
-  renderDepotSection();
+  renderAccountsInVermoegen();
   renderVermoegenSummary();
   renderInvestSection();
   renderDebtSection();
@@ -1107,7 +1107,7 @@ function openAccountItemModal(prefill = null) {
         </select>
       </div>
       <div class="field"><label>Aktueller Saldo (${state.currency})</label>
-        <input id="m-balance" type="number" inputmode="decimal" placeholder="0" value="${prefill?.balance ?? ''}">
+        <input id="m-balance" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.balance ?? ''}">
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1144,7 +1144,7 @@ function openTransferModal() {
       <div class="field"><label>Von Konto</label><select id="m-from">${opts}</select></div>
       <div class="field"><label>Auf Konto</label><select id="m-to">${opts2}</select></div>
       <div class="field"><label>Betrag (${state.currency})</label>
-        <input id="m-transfer-amount" type="number" inputmode="decimal" placeholder="0">
+        <input id="m-transfer-amount" type="number" inputmode="decimal" step="any" placeholder="0">
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1181,7 +1181,7 @@ function openIncomeModal(prefill = null) {
         <input id="m-name" type="text" placeholder="z.B. Gehalt" value="${prefill?.name || ''}">
       </div>
       <div class="field"><label>Betrag pro Monat (${state.currency})</label>
-        <input id="m-amount" type="number" inputmode="decimal" placeholder="0" value="${prefill?.amount || ''}">
+        <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.amount || ''}">
       </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
@@ -1234,11 +1234,11 @@ function openExpenseModal(prefill = null) {
         </select>
       </div>
       <div class="field"><label id="m-amount-label">Betrag (${state.currency})</label>
-        <input id="m-amount" type="number" inputmode="decimal" placeholder="0" value="${prefill?.amount || ''}" oninput="updateExpenseAmountLabel()">
+        <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.amount || ''}" oninput="updateExpenseAmountLabel()">
         <div id="m-amount-hint" style="font-size:12px;color:var(--text2);margin-top:4px"></div>
       </div>
       <div class="field"><label>Budget-Limit/Monat (${state.currency}, optional)</label>
-        <input id="m-limit" type="number" inputmode="decimal" placeholder="0 = kein Limit" value="${prefill?.budgetLimit || ''}">
+        <input id="m-limit" type="number" inputmode="decimal" step="any" placeholder="0 = kein Limit" value="${prefill?.budgetLimit || ''}">
       </div>
       <div class="field"><label>Notiz (optional)</label>
         <input id="m-note" type="text" value="${prefill?.note || ''}">
@@ -1301,7 +1301,7 @@ function openTransactionModal() {
         </select>
       </div>
       <div class="field"><label>Betrag (${state.currency})</label>
-        <input id="m-amount" type="number" inputmode="decimal" placeholder="0">
+        <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0">
       </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
@@ -1345,7 +1345,7 @@ function openInvestmentModal(prefill = null) {
         <input id="m-name" type="text" placeholder="z.B. MSCI World ETF" value="${prefill?.name || ''}">
       </div>
       <div class="field"><label>Monatlicher Betrag (${state.currency})</label>
-        <input id="m-amount" type="number" inputmode="decimal" placeholder="0" value="${prefill?.amount || ''}">
+        <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.amount || ''}">
       </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
@@ -1353,7 +1353,7 @@ function openInvestmentModal(prefill = null) {
         </select>
       </div>
       <div class="field"><label>Erwartete Rendite p.a. (%)</label>
-        <input id="m-return" type="number" inputmode="decimal" placeholder="6" min="0" max="50" value="${prefill?.returnRate ?? 6}">
+        <input id="m-return" type="number" inputmode="decimal" step="any" placeholder="6" min="0" max="50" value="${prefill?.returnRate ?? 6}">
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1380,7 +1380,7 @@ function openPortfolioModal() {
     <div class="modal">
       <div class="modal-title">Aktueller Depotwert</div>
       <div class="field"><label>Gesamtwert deines Portfolios (${state.currency})</label>
-        <input id="m-portfolio" type="number" inputmode="decimal" placeholder="0" value="${state.portfolioValue || ''}">
+        <input id="m-portfolio" type="number" inputmode="decimal" step="any" placeholder="0" value="${state.portfolioValue || ''}">
         <div style="font-size:12px;color:var(--text2);margin-top:4px">Den Wert findest du in deiner Broker-App oder im e-Banking.</div>
       </div>
       <div class="modal-actions">
@@ -1416,17 +1416,17 @@ function openDebtModal(prefill = null) {
         </select>
       </div>
       <div class="field"><label>Restschuld (${state.currency})</label>
-        <input id="m-remaining" type="number" inputmode="decimal" placeholder="0" value="${prefill?.remainingAmount ?? ''}">
+        <input id="m-remaining" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.remainingAmount ?? ''}">
       </div>
       <div class="field"><label>Ursprünglicher Kreditbetrag (${state.currency})</label>
-        <input id="m-original" type="number" inputmode="decimal" placeholder="0" value="${prefill?.originalAmount ?? ''}">
+        <input id="m-original" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.originalAmount ?? ''}">
         <div style="font-size:12px;color:var(--text2);margin-top:4px">Für Fortschrittsanzeige (optional)</div>
       </div>
       <div class="field"><label>Monatliche Rate (${state.currency})</label>
-        <input id="m-payment" type="number" inputmode="decimal" placeholder="0" value="${prefill?.monthlyPayment ?? ''}">
+        <input id="m-payment" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.monthlyPayment ?? ''}">
       </div>
       <div class="field"><label>Zinssatz pro Jahr (%)</label>
-        <input id="m-rate" type="number" inputmode="decimal" placeholder="0" min="0" value="${prefill?.interestRate ?? ''}">
+        <input id="m-rate" type="number" inputmode="decimal" step="any" placeholder="0" min="0" value="${prefill?.interestRate ?? ''}">
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1518,7 +1518,7 @@ function openTaxCalculator() {
         Ohne Gewähr – für exakte Zahlen bitte Steuerberater kontaktieren.
       </div>
       <div class="field"><label>Brutto-Einkommen pro Jahr (${state.currency})</label>
-        <input id="m-gross" type="number" inputmode="decimal" value="${grossAnnual}" oninput="updateTaxPreview()">
+        <input id="m-gross" type="number" inputmode="decimal" step="any" value="${grossAnnual}" oninput="updateTaxPreview()">
       </div>
       <div class="field"><label>Kanton</label>
         <select id="m-canton" onchange="updateTaxPreview()">${cantonOpts}</select>
@@ -1579,10 +1579,10 @@ function openGoalModal(prefill = null) {
         <input id="m-name" type="text" placeholder="z.B. Traumurlaub" value="${prefill?.name || ''}">
       </div>
       <div class="field"><label>Zielbetrag (${state.currency})</label>
-        <input id="m-target" type="number" inputmode="decimal" placeholder="0" value="${prefill?.targetAmount || ''}">
+        <input id="m-target" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.targetAmount || ''}">
       </div>
       <div class="field"><label>Bereits gespart (${state.currency})</label>
-        <input id="m-current" type="number" inputmode="decimal" placeholder="0" value="${prefill?.currentAmount || 0}">
+        <input id="m-current" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.currentAmount || 0}">
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1615,15 +1615,15 @@ function openFIRESettings() {
     <div class="modal">
       <div class="modal-title">🔥 FIRE-Einstellungen</div>
       <div class="field"><label>Monatliche Ausgaben im Ruhestand (${state.currency})</label>
-        <input id="m-fire-exp" type="number" inputmode="decimal" placeholder="${totalExpenses()}" value="${state.settings.fireMonthlyExpenses || ''}">
+        <input id="m-fire-exp" type="number" inputmode="decimal" step="any" placeholder="${totalExpenses()}" value="${state.settings.fireMonthlyExpenses || ''}">
         <div style="font-size:12px;color:var(--text2);margin-top:4px">Leer = aktuelle Ausgaben (${fmt(totalExpenses())})</div>
       </div>
       <div class="field"><label>Entnahmerate (%)</label>
-        <input id="m-fire-rate" type="number" inputmode="decimal" min="1" max="10" step="0.5" value="${state.settings.fireWithdrawalRate}">
+        <input id="m-fire-rate" type="number" inputmode="decimal" step="0.5" min="1" max="10" value="${state.settings.fireWithdrawalRate}">
         <div style="font-size:12px;color:var(--text2);margin-top:4px">Standard: 4% (Trinity-Studie)</div>
       </div>
       <div class="field"><label>Inflationsrate (%)</label>
-        <input id="m-inflation" type="number" inputmode="decimal" min="0" max="20" step="0.5" value="${state.settings.inflationRate}">
+        <input id="m-inflation" type="number" inputmode="decimal" step="0.5" min="0" max="20" value="${state.settings.inflationRate}">
         <div style="font-size:12px;color:var(--text2);margin-top:4px">Für Kaufkraft-Rechner & Realmodus</div>
       </div>
       <div class="modal-actions">
