@@ -43,6 +43,7 @@ let donutChartInst  = null;
 let nwHistChartInst = null;
 let editContext     = null;
 let chartMode       = 'nominal';
+let projectionYears = 10;
 
 function saveState() { localStorage.setItem('finanzplaner', JSON.stringify(state)); }
 
@@ -407,14 +408,15 @@ function renderNetworthHistoryChart() {
 function renderProjectionChart() {
   const canvas = el('projection-chart');
   if (!canvas) return;
-  const months = 60, labels = [], balData = [], invData = [], totalData = [];
+  const months = projectionYears * 12, labels = [], balData = [], invData = [], totalData = [];
   let bal = totalAccounts(), inv = state.portfolioValue;
   const sav = Math.max(0, monthlySavings()), pmt = totalInvestments();
   const r = weightedReturn() / 100 / 12, inf = (state.settings.inflationRate || 2) / 100 / 12;
   const now = new Date();
+  const labelEvery = projectionYears <= 10 ? 6 : projectionYears <= 20 ? 12 : 24;
   for (let m = 0; m <= months; m++) {
     const d = new Date(now.getFullYear(), now.getMonth() + m, 1);
-    labels.push(m % 6 === 0 ? d.toLocaleDateString('de-CH', { month: 'short', year: '2-digit' }) : '');
+    labels.push(m % labelEvery === 0 ? d.toLocaleDateString('de-CH', { month: 'short', year: '2-digit' }) : '');
     bal += sav; inv = inv * (1 + r) + pmt;
     const adj = chartMode === 'real' ? Math.pow(1 + inf, m) : 1;
     balData.push(Math.round(bal / adj)); invData.push(Math.round(inv / adj)); totalData.push(Math.round((bal + inv) / adj));
@@ -448,6 +450,12 @@ function setChartMode(mode) {
   chartMode = mode;
   el('btn-nominal').classList.toggle('active', mode === 'nominal');
   el('btn-real').classList.toggle('active', mode === 'real');
+  renderProjectionChart();
+}
+
+function setProjectionYears(years) {
+  projectionYears = years;
+  [5, 10, 20, 40].forEach(y => el('btn-proj-' + y)?.classList.toggle('active', y === years));
   renderProjectionChart();
 }
 

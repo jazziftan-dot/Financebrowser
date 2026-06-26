@@ -92,12 +92,18 @@
 
     <!-- Prognose-Chart -->
     <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div class="card-title" style="margin-bottom:0">Prognose · 5 Jahre</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="card-title" style="margin-bottom:0">Prognose</div>
         <div class="toggle-group">
           <span class="toggle-btn active" id="btn-nominal" onclick="setChartMode('nominal')">Nominal</span>
           <span class="toggle-btn" id="btn-real" onclick="setChartMode('real')">Real</span>
         </div>
+      </div>
+      <div class="toggle-group" style="margin-bottom:12px">
+        <span class="toggle-btn" id="btn-proj-5" onclick="setProjectionYears(5)">5 J.</span>
+        <span class="toggle-btn active" id="btn-proj-10" onclick="setProjectionYears(10)">10 J.</span>
+        <span class="toggle-btn" id="btn-proj-20" onclick="setProjectionYears(20)">20 J.</span>
+        <span class="toggle-btn" id="btn-proj-40" onclick="setProjectionYears(40)">40 J.</span>
       </div>
       <div class="chart-wrap"><canvas id="projection-chart"></canvas></div>
       <div style="font-size:11px;color:var(--text2);margin-top:8px">Real = inflationsbereinigt. Einstellbar unter ⚙️ → FIRE-Einstellungen.</div>
