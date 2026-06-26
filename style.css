@@ -63,6 +63,8 @@ nav {
 .nav-btn .icon { font-size: 21px; line-height: 1; }
 .nav-btn.active { color: var(--primary-light); }
 
+.nav-brand { display: none; }
+
 /* ── Desktop Layout ── */
 @media (min-width: 768px) {
   :root { --nav-height: 0px; }
@@ -97,6 +99,7 @@ nav {
   }
 
   .nav-brand {
+    display: block;
     padding: 24px 20px 16px;
     font-size: 17px;
     font-weight: 800;
