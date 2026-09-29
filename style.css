@@ -510,6 +510,47 @@ nav {
 .upcoming-when { font-size: 11px; font-weight: 700; color: var(--primary-light); min-width: 52px; }
 .upcoming-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* ── Suche & Filter ── */
+.tx-filter { display: flex; gap: 8px; margin-bottom: 10px; }
+.tx-filter input, .tx-filter select {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); font-size: 16px; padding: 9px 12px; min-height: 42px; font-family: inherit; outline: none;
+}
+.tx-filter input { flex: 1; min-width: 0; -webkit-appearance: none; }
+.tx-filter select { flex-shrink: 0; }
+.tx-filter input:focus, .tx-filter select:focus { border-color: var(--primary); }
+
+/* ── Backup-Hinweis ── */
+.backup-hint { border-color: rgba(234,179,8,.4); background: rgba(234,179,8,.07); }
+
+/* ── Privatsphäre-Modus ── */
+body.privacy .val, body.privacy .nw-amount, body.privacy .nw-breakdown, body.privacy .kpi-value,
+body.privacy .item-amount, body.privacy .nw-sum-val, body.privacy .upcoming-row > span:last-child,
+body.privacy #einkommen-total, body.privacy #ausgaben-total, body.privacy #invest-total,
+body.privacy #portfolio-display, body.privacy #debt-total, body.privacy #debt-pay-total,
+body.privacy canvas, body.privacy .ac-val {
+  filter: blur(8px); user-select: none;
+}
+
+/* ── Sperrbildschirm ── */
+.lock-screen {
+  position: fixed; inset: 0; z-index: 500; background: var(--bg);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: calc(var(--safe-top) + 20px) 24px calc(var(--safe-bottom) + 20px);
+}
+.pin-dots { display: flex; gap: 14px; margin: 24px 0 28px; }
+.pin-dots span { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--text2); }
+.pin-dots span.on { background: var(--primary-light); border-color: var(--primary-light); }
+.pin-dots.shake { animation: shake .35s; }
+@keyframes shake { 0%,100% { transform: none; } 25% { transform: translateX(-8px); } 75% { transform: translateX(8px); } }
+.pin-pad { display: grid; grid-template-columns: repeat(3, 72px); gap: 14px; }
+.pin-key {
+  width: 72px; height: 72px; border-radius: 50%; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 26px; font-weight: 500;
+  cursor: pointer; font-family: inherit; -webkit-appearance: none;
+}
+.pin-key:active { background: var(--primary); }
+
 /* ── Touch-Geräte: grössere Tippflächen (min. ~40px) ── */
 @media (pointer: coarse) {
   .btn-icon { width: 40px; height: 40px; font-size: 16px; }
