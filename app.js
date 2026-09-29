@@ -13,9 +13,27 @@ const DEFAULT_STATE = {
   networthHistory: [],
   transactions: [],
   portfolioHistory: [],
+  cardPayments: [],
   settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0, taxEstimate: null, taxCanton: 'ZH',
-              privacy: false, pinHash: null, pinLength: null, lastBackup: 0, backupSnooze: 0 }
+              privacy: false, pinHash: null, pinLength: null, lastBackup: 0, backupSnooze: 0,
+              // v2: Budgetmonat & Lohn
+              monthMode: 'calendar', payday: 25, paydayWeekendShift: true, transfersDoneFor: null,
+              payroll: { ahv: 5.3, alv: 1.1, alvCap: 148200, nbu: 1.0, bvgMonthly: 0 },
+              grossCalc: { a: 0, b: 0, n: 12, compare: false } }
 };
+
+// Aktuelle Version des Datenmodells. Jede Erhöhung braucht einen Schritt in MIGRATIONS.
+const SCHEMA_VERSION = 2;
+
+// ── Kontotypen ─────────────────────────────────────────────────────────────
+const ACCOUNT_TYPES = {
+  liquid:  { label: 'Liquid (Privatkonto)', short: 'Liquid',      icon: '💳' },
+  savings: { label: 'Sparkonto',            short: 'Sparkonto',   icon: '🏦' },
+  credit:  { label: 'Kreditkarte',          short: 'Kreditkarte', icon: '💳' },
+  bound:   { label: 'Gebunden (Depot, 3a, Kaution …)', short: 'Gebunden', icon: '🔒' }
+};
+const accTypeLabel = t => (ACCOUNT_TYPES[t] || ACCOUNT_TYPES.liquid).short;
+const accTypeIcon  = t => t === 'credit' ? '🪪' : (ACCOUNT_TYPES[t] || ACCOUNT_TYPES.liquid).icon;
 
 // ── Rhythmus & Datums-Helfer ───────────────────────────────────────────────
 // Bewusst vor migrateState/state definiert: werden schon beim Laden der Daten gebraucht.
@@ -43,6 +61,11 @@ function monthsUntil(iso) {
   const now = new Date(), d = parseISO(iso);
   return (d.getFullYear() - now.getFullYear()) * 12 + d.getMonth() - now.getMonth();
 }
+// Datum im Schweizer Format TT.MM.JJJJ (akzeptiert ISO-String, Date oder Zeitstempel)
+function fmtDate(x) {
+  const d = typeof x === 'string' ? parseISO(x.slice(0, 10)) : new Date(x);
+  return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
+}
 function daysUntil(iso) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   return Math.round((parseISO(iso) - today) / 864e5);
@@ -66,8 +89,18 @@ function migrateExpense(e) {
   return out;
 }
 
+// Schrittweise Migrationen: Schlüssel = Zielversion. Laufen der Reihe nach ab der gespeicherten Version.
+const MIGRATIONS = {
+  // v2: neue Kontotypen (liquid | savings | credit | bound)
+  2: st => {
+    const map = { checking: 'liquid', savings: 'savings', depot: 'bound', other: 'bound' };
+    st.accounts = (st.accounts || []).map(a => ({ ...a, type: map[a.type] || (ACCOUNT_TYPES[a.type] ? a.type : 'liquid') }));
+    st.cardPayments = st.cardPayments || [];
+  }
+};
+
 function migrateState(raw) {
-  if (!raw) return JSON.parse(JSON.stringify(DEFAULT_STATE));
+  if (!raw) return { ...JSON.parse(JSON.stringify(DEFAULT_STATE)), schemaVersion: SCHEMA_VERSION };
   if (typeof raw.balance === 'number' && !raw.accounts) {
     raw.accounts = raw.balance > 0
       ? [{ id: uid(), name: 'Girokonto', balance: raw.balance, type: 'checking' }]
@@ -77,9 +110,12 @@ function migrateState(raw) {
   const st = {
     ...JSON.parse(JSON.stringify(DEFAULT_STATE)),
     ...raw,
-    settings: { ...DEFAULT_STATE.settings, ...(raw.settings || {}) }
+    settings: { ...JSON.parse(JSON.stringify(DEFAULT_STATE.settings)), ...(raw.settings || {}) }
   };
+  st.settings.payroll = { ...DEFAULT_STATE.settings.payroll, ...(raw.settings?.payroll || {}) };
   st.expenses = (st.expenses || []).map(migrateExpense);
+  for (let v = (raw.schemaVersion || 1) + 1; v <= SCHEMA_VERSION; v++) MIGRATIONS[v]?.(st);
+  st.schemaVersion = SCHEMA_VERSION;
   return st;
 }
 
@@ -119,6 +155,8 @@ function fmt(n) { return NUM_FMT.format(n) + ' ' + state.currency; }
 // Buchungen: Rappen/Cent anzeigen, falls vorhanden
 const NUM_FMT2 = new Intl.NumberFormat('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 function fmtExact(n) { return (Number.isInteger(n) ? NUM_FMT.format(n) : NUM_FMT2.format(n)) + ' ' + state.currency; }
+// Immer mit Rappen (Tabellen, Abrechnungen): 1'234.50 CHF
+function fmt2(n) { return NUM_FMT2.format(n) + ' ' + state.currency; }
 function fmtK(n) {
   if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M ' + state.currency;
   if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(0) + 'k ' + state.currency;
@@ -342,6 +380,13 @@ function toast(msg) {
 // ── Navigation ─────────────────────────────────────────────────────────────
 const PAGES = ['uebersicht','einkommen','ausgaben','vermoegen','ziele'];
 const RENDERERS = {};
+// Erweiterungen (liquidity.js, contracts.js, …) hängen sich hier ein
+const PAGE_HOOKS = { uebersicht: [], einkommen: [], ausgaben: [], vermoegen: [], ziele: [], txMonthChanged: [], boot: [] };
+const SETTINGS_SECTIONS = [];   // { title, html(), save() } – erscheinen unter ⚙️
+function renderPage(id) {
+  RENDERERS[id]?.();
+  PAGE_HOOKS[id]?.forEach(fn => { try { fn(); } catch (err) { console.error(err); } });
+}
 
 let currentPage = null;
 
@@ -359,12 +404,12 @@ function navigate(id, { push = true } = {}) {
     window.scrollTo(0, 0);
     document.getElementById('page-' + id).scrollTop = 0;
   }
-  RENDERERS[id]?.();
+  renderPage(id);
 }
 
 // Nur die sichtbare Seite neu zeichnen – versteckte Seiten werden beim Öffnen gerendert
 function refreshCurrent() {
-  if (currentPage) RENDERERS[currentPage]?.();
+  if (currentPage) renderPage(currentPage);
 }
 
 const pageFromHash = () => (location.hash || '').slice(1);
@@ -651,7 +696,7 @@ RENDERERS.ausgaben = function() {
         const irregular = isIrregular(e);
         const freqLabel = irregular ? `<span class="freq-badge">${CYCLE_LABEL[e.frequency]}${hasReserve(e) ? ' 🐷' : ''}</span>` : '';
         const dueInfo = irregular
-          ? (e.nextDue ? ` · fällig ${parseISO(e.nextDue).toLocaleDateString('de-CH')}` : ' · Fälligkeit fehlt')
+          ? (e.nextDue ? ` · fällig ${fmtDate(e.nextDue)}` : ' · Fälligkeit fehlt')
           : (e.dueDay ? ` · am ${e.dueDay}.` : '');
         return `
         <div class="list-item${over ? ' item-over' : ''}">
@@ -687,9 +732,57 @@ RENDERERS.ausgaben = function() {
 const monthKey   = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 const monthLabel = key => { const [y, m] = key.split('-'); return new Date(y, m - 1, 1).toLocaleDateString('de-CH', { month: 'long', year: 'numeric' }); };
 const localISO   = (d = new Date()) => `${monthKey(d)}-${String(d.getDate()).padStart(2, '0')}`;
-let txMonth = monthKey();
 
-const txOfMonth = key => (state.transactions || []).filter(t => t.date?.startsWith(key));
+// ── Budgetmonat: Kalendermonat oder Lohnzyklus ─────────────────────────────
+// Schlüssel bleibt 'YYYY-MM' = Monat, in dem die Periode beginnt.
+// Lohnzyklus: vom Lohntag bis zum Tag vor dem nächsten Lohntag.
+const usePayday = () => state.settings.monthMode === 'payday';
+
+// Lohntag eines Monats (m 0-basiert); auf Wochenende → vorheriger Freitag (optional)
+function paydayDate(y, m) {
+  const day = Math.min(state.settings.payday || 25, new Date(y, m + 1, 0).getDate());
+  const d = new Date(y, m, day);
+  if (state.settings.paydayWeekendShift !== false) {
+    if (d.getDay() === 6) d.setDate(d.getDate() - 1);
+    else if (d.getDay() === 0) d.setDate(d.getDate() - 2);
+  }
+  return d;
+}
+function shiftKey(key, delta) {
+  const [y, m] = key.split('-').map(Number);
+  return monthKey(new Date(y, m - 1 + delta, 1));
+}
+function periodStart(key) {
+  const [y, m] = key.split('-').map(Number);
+  return usePayday() ? paydayDate(y, m - 1) : new Date(y, m - 1, 1);
+}
+function periodRange(key) {
+  const end = periodStart(shiftKey(key, 1));
+  end.setDate(end.getDate() - 1);
+  return { start: isoDate(periodStart(key)), end: isoDate(end) };
+}
+function periodKeyOf(date = new Date()) {
+  const d = new Date(date); d.setHours(0, 0, 0, 0);
+  const k = monthKey(d);
+  if (!usePayday()) return k;
+  return d >= periodStart(k) ? k : shiftKey(k, -1);
+}
+function periodLabel(key, short = false) {
+  if (!usePayday()) {
+    const [y, m] = key.split('-');
+    return new Date(y, m - 1, 1).toLocaleDateString('de-CH', short ? { month: 'short' } : { month: 'long', year: 'numeric' });
+  }
+  const { start, end } = periodRange(key);
+  const dm = iso => `${iso.slice(8, 10)}.${iso.slice(5, 7)}.`;
+  return short ? dm(start) : `${dm(start)} – ${dm(end)}${end.slice(0, 4)}`;
+}
+
+let txMonth = periodKeyOf();
+
+const txOfMonth = key => {
+  const { start, end } = periodRange(key);
+  return (state.transactions || []).filter(t => t.date && t.date >= start && t.date <= end);
+};
 
 function monthTotals(key) {
   const txs = txOfMonth(key);
@@ -736,16 +829,17 @@ function upcomingPayments(days = 14, irregularDays = 30) {
     out.push({ name: e.name, amount: e.amount, category: e.category, type: 'expense', date: parseISO(e.nextDue),
       days: d, expenseId: e.id, irregular: true, shortfall: hasReserve(e) ? reserveInfo(e).shortfall : 0, reserve: hasReserve(e) });
   });
+  if (typeof cardUpcoming === 'function') out.push(...cardUpcoming(irregularDays));
   return out.sort((a, b) => a.date - b.date);
 }
 
 function renderDashMonth() {
-  const key = monthKey();
+  const key = periodKeyOf();
   const { income, expense, saldo, txs, plannedExpense } = monthTotals(key);
-  el('dash-month-title').textContent = monthLabel(key);
-  const now = new Date();
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const elapsed = now.getDate() / daysInMonth * 100;
+  el('dash-month-title').textContent = periodLabel(key);
+  const { start, end } = periodRange(key);
+  const periodDays = (parseISO(end) - parseISO(start)) / 864e5 + 1;
+  const elapsed = Math.min(100, (-daysUntil(start) + 1) / periodDays * 100);
   // Frei verfügbar = Überschuss nach Fixkosten, Rückstellungen, Investitionen und Raten + Saldo der Buchungen.
   // Über "Bezahlt" erfasste Fixkosten/Jahreszahlungen sind schon eingeplant → nicht doppelt abziehen.
   const plannedFree = cashflowFree();
@@ -780,6 +874,7 @@ function renderUpcomingList(up, max) {
         ${p.shortfall > 0 ? `<br><span class="upcoming-warn">⚠️ Es fehlen ${fmtExact(round2(p.shortfall))}</span>` : ''}</span>
       <span style="font-weight:600;color:${p.type === 'income' ? 'var(--green)' : 'var(--red)'}">${p.type === 'income' ? '+' : '−'}${fmt(p.amount)}</span>
       ${p.irregular ? `<button class="toggle-btn" onclick="openPaidModal('${p.expenseId}')">Bezahlt</button>` : ''}
+      ${p.cardId && p.payable ? `<button class="toggle-btn" onclick="openCardPayModal('${p.cardId}','${p.statement}')">Bezahlt</button>` : ''}
     </div>`).join('')}</div>`;
 }
 
@@ -797,6 +892,7 @@ function shiftTxMonth(delta) {
   const [y, m] = txMonth.split('-').map(Number);
   txMonth = monthKey(new Date(y, m - 1 + delta, 1));
   renderTransactions();
+  PAGE_HOOKS.txMonthChanged.forEach(fn => fn());
 }
 
 // Buchung wirkt sich auf verknüpftes Konto aus (sign = +1 anwenden, -1 rückgängig machen)
@@ -809,7 +905,7 @@ function applyTxToAccount(tx, sign) {
 function renderTransactions() {
   const list = el('transactions-list');
   if (!list) return;
-  el('tx-month-label').textContent = monthLabel(txMonth);
+  el('tx-month-label').textContent = periodLabel(txMonth);
 
   const { txs, income, expense, saldo } = monthTotals(txMonth);
   el('tx-month-summary').innerHTML = `
@@ -853,7 +949,7 @@ function renderTransactions() {
   if (typeFilter !== 'all') shown = shown.filter(t => (t.type === 'income') === (typeFilter === 'income'));
 
   if (!shown.length) {
-    list.innerHTML = emptyState('📒', query ? `Keine Treffer für „${esc(query)}“.` : `Keine Buchungen im ${monthLabel(txMonth)}.`);
+    list.innerHTML = emptyState('📒', query ? `Keine Treffer für „${esc(query)}“.` : `Keine Buchungen im Zeitraum ${periodLabel(txMonth)}.`);
     return;
   }
   const accName = id => state.accounts.find(a => a.id === id)?.name;
@@ -870,7 +966,7 @@ function renderTransactions() {
         <div class="item-icon" style="background:${colorFor(t.category)}22">${iconFor(t.category)}</div>
         <div>
           <div class="item-name">${esc(t.name)}${t.fromReserve ? ' <span class="freq-badge">🐷 aus Rückstellung</span>' : ''}</div>
-          <div class="item-sub">${esc(t.category || '–')} · ${new Date(t.date).toLocaleDateString('de-CH')}${acc ? ' · ' + esc(acc) : ''}</div>
+          <div class="item-sub">${esc(t.category || '–')} · ${fmtDate(t.date)}${acc ? ' · ' + esc(acc) : ''}</div>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
@@ -920,7 +1016,7 @@ function renderReserveSection() {
       ${candidates.map(e => `
         <div class="upcoming-row" style="margin-bottom:6px">
           <span class="upcoming-name">${iconFor(e.category)} ${esc(e.name)}
-            <br><span style="font-size:11px;color:var(--text2)">${fmt(e.amount)} ${CYCLE_LABEL[e.frequency].toLowerCase()}${e.nextDue ? ' · fällig ' + parseISO(e.nextDue).toLocaleDateString('de-CH') : ' · Fälligkeit fehlt'}</span></span>
+            <br><span style="font-size:11px;color:var(--text2)">${fmt(e.amount)} ${CYCLE_LABEL[e.frequency].toLowerCase()}${e.nextDue ? ' · fällig ' + fmtDate(e.nextDue) : ' · Fälligkeit fehlt'}</span></span>
           <button class="toggle-btn" onclick="openEdit('expense','${e.id}')">Einrichten</button>
         </div>`).join('')}
     </div>` : ''}`;
@@ -940,7 +1036,7 @@ function renderPot(e) {
       <div class="item-icon" style="background:${colorFor(e.category)}22">${iconFor(e.category)}</div>
       <div style="flex:1;min-width:0">
         <div class="item-name">${esc(e.name)}</div>
-        <div class="item-sub">${parseISO(e.nextDue).toLocaleDateString('de-CH')} · ${when}${acc ? ' · ' + esc(acc.name) : ''}</div>
+        <div class="item-sub">${fmtDate(e.nextDue)} · ${when}${acc ? ' · ' + esc(acc.name) : ''}</div>
       </div>
       <span class="status-badge badge-${i.status}">${STATUS_LABEL[i.status]}</span>
     </div>
@@ -1032,7 +1128,7 @@ function openPaidModal(id) {
         <select id="m-account">${accountOptions(e.reserveAccountId)}</select>
       </div>` : ''}
       <div style="font-size:12px;color:var(--text2)">
-        ${reserve ? `Der Topf wird um den Betrag geleert${saved > e.amount ? ' (Überschuss bleibt drin)' : ''}. ` : ''}Nächste Fälligkeit: <strong style="color:var(--text)">${parseISO(next).toLocaleDateString('de-CH')}</strong>
+        ${reserve ? `Der Topf wird um den Betrag geleert${saved > e.amount ? ' (Überschuss bleibt drin)' : ''}. ` : ''}Nächste Fälligkeit: <strong style="color:var(--text)">${fmtDate(next)}</strong>
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1057,7 +1153,7 @@ function savePaid(id) {
   if (reserve) e.reserveSaved = round2(Math.max(0, (e.reserveSaved || 0) - amount));
   e.nextDue = addMonthsISO(e.nextDue || date, cycleOf(e), e.dueDay);
   saveState(); closeModal();
-  toast(`Bezahlt ✓ · nächste Fälligkeit ${parseISO(e.nextDue).toLocaleDateString('de-CH')}`);
+  toast(`Bezahlt ✓ · nächste Fälligkeit ${fmtDate(e.nextDue)}`);
   refreshCurrent();
 }
 
@@ -1155,7 +1251,7 @@ function renderReport() {
   const card = el('report-card');
   if (!card) return;
   const now = new Date();
-  const months = Array.from({ length: 12 }, (_, i) => monthKey(new Date(now.getFullYear(), now.getMonth() - 11 + i, 1)));
+  const months = Array.from({ length: 12 }, (_, i) => shiftKey(periodKeyOf(now), i - 11));
   const totals = months.map(k => monthTotals(k));
   const active = totals.filter(t => t.txs.length);
   if (!active.length) {
@@ -1191,7 +1287,7 @@ function renderReport() {
   reportChartInst = new Chart(el('report-chart'), {
     type: 'bar',
     data: {
-      labels: months.map(k => { const [y, m] = k.split('-'); return new Date(y, m - 1, 1).toLocaleDateString('de-CH', { month: 'short' }); }),
+      labels: months.map(k => periodLabel(k, true)),
       datasets: [
         { label: 'Einnahmen', data: totals.map(t => t.income),  backgroundColor: '#10b981', borderRadius: 4, stack: 'in' },
         { label: 'Ausgaben',  data: totals.map(t => t.expense - t.reserveExpense), backgroundColor: '#ef4444', borderRadius: 4, stack: 'out' },
@@ -1365,7 +1461,7 @@ function confirmBankImport() {
   const accountId = el('m-account')?.value || null;
   if (!state.transactions) state.transactions = [];
   for (const t of items) state.transactions.push({ id: uid(), ...t, note: '', accountId, noBalance: !!accountId });
-  txMonth = items.map(t => t.date).sort().pop().slice(0, 7);
+  txMonth = periodKeyOf(parseISO(items.map(t => t.date).sort().pop()));
   bankImport = null;
   saveState(); closeModal(); toast(`${items.length} Buchungen importiert ✓`);
   refreshCurrent();
@@ -1533,15 +1629,13 @@ function renderAccountsInVermoegen() {
   const container = el('accounts-vermoegen-list');
   if (!container) return;
   if (!state.accounts.length) { container.innerHTML = emptyState('💳', 'Noch keine Konten erfasst.'); return; }
-  const typeLabel = { checking:'Girokonto', savings:'Sparkonto', depot:'Depot', other:'Sonstiges' };
-  const typeIcon  = { checking:'💳', savings:'🏦', depot:'📈', other:'💰' };
   container.innerHTML = state.accounts.map(a => `
     <div class="list-item" style="margin-bottom:8px">
       <div class="item-left">
-        <div class="item-icon" style="background:rgba(99,102,241,.15)">${typeIcon[a.type] || '💳'}</div>
+        <div class="item-icon" style="background:rgba(99,102,241,.15)">${accTypeIcon(a.type)}</div>
         <div>
           <div class="item-name">${esc(a.name)}</div>
-          <div class="item-sub">${typeLabel[a.type] || a.type}${(() => { const r = reserveExpenses().filter(e => e.reserveAccountId === a.id).reduce((s, e) => s + (e.reserveSaved || 0), 0); return r > 0 ? ` · 🐷 ${fmtExact(round2(r))} reserviert` : ''; })()}</div>
+          <div class="item-sub">${accTypeLabel(a.type)}${(() => { const r = reserveExpenses().filter(e => e.reserveAccountId === a.id).reduce((s, e) => s + (e.reserveSaved || 0), 0); return r > 0 ? ` · 🐷 ${fmtExact(round2(r))} reserviert` : ''; })()}</div>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
@@ -1551,7 +1645,7 @@ function renderAccountsInVermoegen() {
           <button class="btn btn-danger btn-icon" onclick="deleteItem('account','${a.id}')">🗑️</button>
         </div>
       </div>
-    </div>`).join('');
+    </div>${a.type === 'credit' && typeof renderCardDetails === 'function' ? renderCardDetails(a) : ''}`).join('');
 }
 
 // ── Depot-Import (CSV / Excel) ─────────────────────────────────────────────
@@ -1699,7 +1793,7 @@ function renderDepotSection() {
       <div class="kpi-item"><div class="kpi-label">${invested != null ? 'Gewinn/Verlust' : 'Veränderung'}</div>
         <div class="kpi-value" style="color:${col}">${up ? '+' : ''}${fmtK(gain)} <span style="font-size:12px">(${up ? '+' : ''}${gainPct.toFixed(1)}%)</span></div></div>
     </div>
-    <div style="font-size:11px;color:var(--text2);margin-top:6px">${hist.length} Einträge · ${new Date(first.date).toLocaleDateString('de-CH')} – ${new Date(last.date).toLocaleDateString('de-CH')}</div>`;
+    <div style="font-size:11px;color:var(--text2);margin-top:6px">${hist.length} Einträge · ${fmtDate(first.date)} – ${fmtDate(last.date)}</div>`;
 
   const canvas = el('depot-chart');
   if (!canvas || !window.Chart) return;
@@ -2079,11 +2173,11 @@ function openAccountsModal() {
             <div class="list-item" style="margin-bottom:8px">
               <div class="item-left">
                 <div class="item-icon" style="background:rgba(99,102,241,.15)">
-                  ${{ checking:'💳', savings:'🏦', depot:'📈', other:'💰' }[a.type] || '💳'}
+                  ${accTypeIcon(a.type)}
                 </div>
                 <div>
                   <div class="item-name">${esc(a.name)}</div>
-                  <div class="item-sub">${{ checking:'Girokonto', savings:'Sparkonto', depot:'Depot', other:'Sonstiges' }[a.type] || a.type}</div>
+                  <div class="item-sub">${accTypeLabel(a.type)}</div>
                 </div>
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
@@ -2113,15 +2207,26 @@ function openAccountItemModal(prefill = null) {
         <input id="m-name" type="text" placeholder="z.B. Sparkonto Migros Bank" value="${esc(prefill?.name)}">
       </div>
       <div class="field"><label>Kontotyp</label>
-        <select id="m-type">
-          <option value="checking" ${prefill?.type === 'checking' ? 'selected' : ''}>💳 Girokonto</option>
-          <option value="savings"  ${prefill?.type === 'savings'  ? 'selected' : ''}>🏦 Sparkonto</option>
-          <option value="depot"    ${prefill?.type === 'depot'    ? 'selected' : ''}>📈 Depot</option>
-          <option value="other"    ${prefill?.type === 'other'    ? 'selected' : ''}>💰 Sonstiges</option>
+        <select id="m-type" onchange="onAccountTypeChange()">
+          ${Object.entries(ACCOUNT_TYPES).map(([k, t]) => `<option value="${k}" ${(prefill?.type || 'liquid') === k ? 'selected' : ''}>${accTypeIcon(k)} ${t.label}</option>`).join('')}
         </select>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">Nur „Liquid“-Konten zählen für „Safe to spend“.</div>
       </div>
-      <div class="field"><label>Aktueller Saldo (${state.currency})</label>
+      <div class="field"><label id="m-balance-label">Aktueller Saldo (${state.currency})</label>
         <input id="m-balance" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.balance ?? ''}">
+      </div>
+      <div id="m-credit-wrap">
+        <div style="display:flex;gap:8px">
+          <div class="field" style="flex:1"><label>Abrechnungstag</label>
+            <input id="m-stmt-day" type="number" inputmode="numeric" min="1" max="31" placeholder="z.B. 20" value="${prefill?.statementDay || ''}">
+          </div>
+          <div class="field" style="flex:1"><label>Zahlungsfrist (Tage)</label>
+            <input id="m-term" type="number" inputmode="numeric" min="0" max="90" placeholder="20" value="${prefill?.paymentTermDays ?? ''}">
+          </div>
+        </div>
+        <div class="field"><label>Limite (${state.currency})</label>
+          <input id="m-limit" type="number" inputmode="decimal" step="any" placeholder="z.B. 5000" value="${prefill?.limit || ''}">
+        </div>
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -2129,6 +2234,15 @@ function openAccountItemModal(prefill = null) {
       </div>
     </div>
   </div>`);
+  onAccountTypeChange();
+}
+
+function onAccountTypeChange() {
+  const credit = el('m-type')?.value === 'credit';
+  el('m-credit-wrap').style.display = credit ? '' : 'none';
+  el('m-balance-label').textContent = credit
+    ? `Aktuell offener Betrag (${state.currency}, als Minus erfassen)`
+    : `Aktueller Saldo (${state.currency})`;
 }
 
 function saveAccount() {
@@ -2136,10 +2250,22 @@ function saveAccount() {
   const type    = el('m-type')?.value;
   const balance = parseFloat(el('m-balance')?.value) || 0;
   if (!name) { toast('Bitte Bezeichnung eingeben'); return; }
+  const data = { name, type, balance };
+  if (type === 'credit') {
+    const day = parseInt(el('m-stmt-day')?.value);
+    if (!(day >= 1 && day <= 31)) { toast('Abrechnungstag (1–31) angeben'); return; }
+    data.statementDay = day;
+    data.paymentTermDays = Math.max(0, parseInt(el('m-term')?.value) || 20);
+    data.limit = parseFloat(el('m-limit')?.value) || 0;
+    // Karten-Buchungen erst ab jetzt zu Abrechnungen zusammenfassen (alte Käufe gelten als erledigt)
+    if (balance > 0) data.balance = -balance;
+  }
   if (editContext?.type === 'account') {
-    Object.assign(state.accounts.find(x => x.id === editContext.id), { name, type, balance });
+    const acc = state.accounts.find(x => x.id === editContext.id);
+    if (type === 'credit' && !acc.trackingSince) data.trackingSince = localISO();
+    Object.assign(acc, data);
   } else {
-    state.accounts.push({ id: uid(), name, type, balance });
+    state.accounts.push({ id: uid(), ...data, ...(type === 'credit' ? { trackingSince: localISO() } : {}) });
   }
   saveState(); closeModal(); toast('Gespeichert ✓');
   refreshCurrent();
@@ -2380,13 +2506,13 @@ function updateTxCategories() {
 
 function accountOptions(selectedId) {
   return `<option value="">— Kein Konto —</option>` + state.accounts.map(a =>
-    `<option value="${a.id}" ${a.id === selectedId ? 'selected' : ''}>${esc(a.name)} (${fmt(a.balance)})</option>`).join('');
+    `<option value="${a.id}" ${a.id === selectedId ? 'selected' : ''}>${accTypeIcon(a.type)} ${esc(a.name)} (${fmt(a.balance)})</option>`).join('');
 }
 
 function openTransactionModal(prefill = null) {
   const type = prefill?.type || 'expense';
   // Neue Buchung im gerade angezeigten Monat vorbelegen (heute, falls aktueller Monat)
-  const date = prefill?.date || (txMonth === monthKey() ? localISO() : txMonth + '-01');
+  const date = prefill?.date || (txMonth === periodKeyOf() ? localISO() : periodRange(txMonth).start);
   showModal(`
   <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
     <div class="modal">
@@ -2410,8 +2536,9 @@ function openTransactionModal(prefill = null) {
         <input id="m-date" type="date" value="${date}">
       </div>
       ${state.accounts.length ? `
-      <div class="field"><label>Konto (optional – Saldo wird angepasst)</label>
+      <div class="field"><label>Zahlungsmittel (optional – Saldo wird angepasst)</label>
         <select id="m-account">${accountOptions(prefill?.accountId)}</select>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">Kreditkarte wählen: zählt am Kaufdatum, bezahlt wird mit der Monatsabrechnung.</div>
       </div>` : ''}
       <div class="field"><label>Notiz (optional)</label>
         <input id="m-note" type="text" value="${esc(prefill?.note)}">
@@ -2442,7 +2569,7 @@ function saveTransaction() {
     state.transactions.push(tx);
     applyTxToAccount(tx, +1);
   }
-  txMonth = date.slice(0, 7); // zum Monat der Buchung springen
+  txMonth = periodKeyOf(parseISO(date)); // zum Budgetmonat der Buchung springen
   saveState(); closeModal(); toast('Buchung gespeichert ✓');
   refreshCurrent();
 }
@@ -2804,12 +2931,16 @@ function openSettings() {
           ${['CHF','EUR','USD','GBP','JPY'].map(c => `<option ${state.currency === c ? 'selected' : ''}>${c}</option>`).join('')}
         </select>
       </div>
+      ${SETTINGS_SECTIONS.map(sec => `
+      <div style="height:1px;background:var(--border);margin:14px 0"></div>
+      <div class="card-title" style="margin-bottom:10px">${sec.title}</div>
+      ${sec.html()}`).join('')}
       <div style="height:1px;background:var(--border);margin:14px 0"></div>
       <div class="card-title" style="margin-bottom:10px">Sicherheit</div>
       <button class="btn btn-ghost btn-full" onclick="openPinSetup()">🔒 ${state.settings.pinHash ? 'PIN ändern / entfernen' : 'App-Sperre mit PIN einrichten'}</button>
       <div style="height:1px;background:var(--border);margin:14px 0"></div>
       <div class="card-title" style="margin-bottom:10px">Daten-Backup</div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">Deine Daten liegen nur auf diesem Gerät. Letztes Backup: <strong style="color:var(--text)">${state.settings.lastBackup ? new Date(state.settings.lastBackup).toLocaleDateString('de-CH') : 'noch nie'}</strong></div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">Deine Daten liegen nur auf diesem Gerät. Letztes Backup: <strong style="color:var(--text)">${state.settings.lastBackup ? fmtDate(state.settings.lastBackup) : 'noch nie'}</strong></div>
       <button class="btn btn-ghost btn-full" onclick="exportData()">⬇️ Exportieren (JSON)</button>
       <button class="btn btn-ghost btn-full" style="margin-top:8px" onclick="exportTransactionsCSV()">📊 Buchungen als CSV (Excel)</button>
       <div style="margin-top:8px">
@@ -2830,6 +2961,8 @@ function openSettings() {
 
 function saveSettings() {
   state.currency = el('m-currency')?.value || 'CHF';
+  for (const sec of SETTINGS_SECTIONS) if (sec.save() === false) return;   // Validierungsfehler → offen lassen
+  txMonth = periodKeyOf();
   saveState(); closeModal(); toast('Gespeichert ✓'); refreshCurrent();
 }
 
@@ -3027,6 +3160,7 @@ function boot() {
     else if (hiddenAt && Date.now() - hiddenAt > 60e3) showLockScreen();
   });
   autoNetworthSnapshot();
+  PAGE_HOOKS.boot.forEach(fn => { try { fn(); } catch (err) { console.error(err); } });
   const start = PAGES.includes(pageFromHash()) ? pageFromHash() : 'uebersicht';
   history.replaceState({ page: start }, '', '#' + start);
   navigate(start, { push: false });
@@ -3039,5 +3173,6 @@ function boot() {
   });
 }
 
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-else boot();
+// Erst starten, wenn alle (deferred) Skripte geladen sind – Erweiterungen registrieren sich vorher
+if (document.readyState === 'complete') boot();
+else document.addEventListener('DOMContentLoaded', boot);
