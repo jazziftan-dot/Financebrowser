@@ -25,8 +25,13 @@
   <div id="page-uebersicht" class="page active">
     <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
       <div><h1>Übersicht</h1><p>Deine Finanzen auf einen Blick</p></div>
-      <button class="btn btn-ghost btn-icon" onclick="openSettings()" style="margin-top:4px">⚙️</button>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <button class="btn btn-ghost btn-icon" id="privacy-btn" onclick="togglePrivacy()" aria-label="Beträge verbergen">👁</button>
+        <button class="btn btn-ghost btn-icon" onclick="openSettings()" aria-label="Einstellungen">⚙️</button>
+      </div>
     </div>
+
+    <div id="dash-backup-hint"></div>
 
     <div class="card networth-card" onclick="openAccountsModal()">
       <div class="nw-label">Nettovermögen</div>
@@ -207,10 +212,29 @@
     </div>
     <div id="tx-month-summary"></div>
     <div id="tx-category-breakdown"></div>
-    <div class="item-list" id="transactions-list"></div>
-    <div style="margin-top:8px">
-      <button class="add-btn" onclick="openTransactionModal()">+ Buchung erfassen</button>
+    <div class="tx-filter">
+      <input id="tx-search" type="search" placeholder="🔍 Suchen (alle Monate)…" oninput="renderTransactions()" aria-label="Buchungen durchsuchen">
+      <select id="tx-type-filter" onchange="renderTransactions()" aria-label="Typ filtern">
+        <option value="all">Alle</option>
+        <option value="expense">Ausgaben</option>
+        <option value="income">Einnahmen</option>
+      </select>
     </div>
+    <div class="item-list" id="transactions-list"></div>
+    <div style="margin-top:8px;display:flex;gap:8px">
+      <button class="add-btn" style="flex:2" onclick="openTransactionModal()">+ Buchung erfassen</button>
+      <label class="add-btn transfer-btn" style="flex:1">
+        🏦 Bank-CSV
+        <input type="file" accept=".csv,.txt" onchange="handleBankImport(event)" style="display:none">
+      </label>
+    </div>
+
+    <!-- 12-Monats-Bericht -->
+    <div class="section-divider" style="margin-top:20px">
+      <div class="sdiv-title">📊 Bericht (12 Monate)</div>
+      <div class="sdiv-line"></div>
+    </div>
+    <div class="card" id="report-card"></div>
   </div><!-- /ausgaben -->
 
 

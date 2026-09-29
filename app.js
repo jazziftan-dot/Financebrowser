@@ -13,7 +13,8 @@ const DEFAULT_STATE = {
   networthHistory: [],
   transactions: [],
   portfolioHistory: [],
-  settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0, taxEstimate: null, taxCanton: 'ZH' }
+  settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0, taxEstimate: null, taxCanton: 'ZH',
+              privacy: false, pinHash: null, pinLength: null, lastBackup: 0, backupSnooze: 0 }
 };
 
 function migrateState(raw) {
@@ -57,6 +58,9 @@ const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ESC_MAP[c]);
 // ── Formatierung ───────────────────────────────────────────────────────────
 const NUM_FMT = new Intl.NumberFormat('de-CH', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 function fmt(n) { return NUM_FMT.format(n) + ' ' + state.currency; }
+// Buchungen: Rappen/Cent anzeigen, falls vorhanden
+const NUM_FMT2 = new Intl.NumberFormat('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function fmtExact(n) { return (Number.isInteger(n) ? NUM_FMT.format(n) : NUM_FMT2.format(n)) + ' ' + state.currency; }
 function fmtK(n) {
   if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M ' + state.currency;
   if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(0) + 'k ' + state.currency;
@@ -287,6 +291,7 @@ RENDERERS.uebersicht = function() {
   el('dash-savings').className = 'val ' + (savings >= 0 ? 'green' : 'red');
 
   renderDashMonth();
+  renderBackupHint();
 
   // Notfallfonds
   const em = emergencyStatus();
@@ -564,6 +569,7 @@ RENDERERS.ausgaben = function() {
     : emptyState('💸', 'Noch keine Ausgaben erfasst.');
 
   renderTransactions();
+  renderReport();
 };
 
 // ── Buchungen pro Monat ────────────────────────────────────────────────────
@@ -672,7 +678,7 @@ function shiftTxMonth(delta) {
 
 // Buchung wirkt sich auf verknüpftes Konto aus (sign = +1 anwenden, -1 rückgängig machen)
 function applyTxToAccount(tx, sign) {
-  if (!tx?.accountId) return;
+  if (!tx?.accountId || tx.noBalance) return;
   const acc = state.accounts.find(a => a.id === tx.accountId);
   if (acc) acc.balance += sign * (tx.type === 'income' ? tx.amount : -tx.amount);
 }
@@ -715,10 +721,25 @@ function renderTransactions() {
       ${Object.keys(limits).length ? '' : '<div style="font-size:11px;color:var(--text2)">Tipp: Setze bei einer Ausgabe ein Budget-Limit, um es hier zu vergleichen.</div>'}
     </div>` : '';
 
-  if (!txs.length) { list.innerHTML = emptyState('📒', `Keine Buchungen im ${monthLabel(txMonth)}.`); return; }
+  // Suche durchsucht alle Monate, sonst nur den gewählten Monat
+  const query = (el('tx-search')?.value || '').trim().toLowerCase();
+  const typeFilter = el('tx-type-filter')?.value || 'all';
+  let shown = query
+    ? (state.transactions || []).filter(t => `${t.name} ${t.category} ${t.note || ''}`.toLowerCase().includes(query))
+    : txs;
+  if (typeFilter !== 'all') shown = shown.filter(t => (t.type === 'income') === (typeFilter === 'income'));
+
+  if (!shown.length) {
+    list.innerHTML = emptyState('📒', query ? `Keine Treffer für „${esc(query)}“.` : `Keine Buchungen im ${monthLabel(txMonth)}.`);
+    return;
+  }
   const accName = id => state.accounts.find(a => a.id === id)?.name;
-  const sorted = [...txs].sort((a, b) => b.date.localeCompare(a.date));
-  list.innerHTML = sorted.map(t => {
+  const sorted = [...shown].sort((a, b) => b.date.localeCompare(a.date));
+  const LIMIT = 200; // grosse Listen begrenzen, damit es auf dem Handy flüssig bleibt
+  const hitsInfo = query
+    ? `<div style="font-size:12px;color:var(--text2);margin-bottom:2px">${sorted.length} Treffer · Summe ${fmtExact(sorted.reduce((s, t) => s + (t.type === 'income' ? t.amount : -t.amount), 0))}</div>`
+    : '';
+  list.innerHTML = hitsInfo + sorted.slice(0, LIMIT).map(t => {
     const acc = accName(t.accountId);
     return `
     <div class="list-item">
@@ -731,7 +752,7 @@ function renderTransactions() {
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
         <span class="item-amount" style="color:${t.type === 'income' ? 'var(--green)' : 'var(--red)'}">
-          ${t.type === 'income' ? '+' : '−'}${fmt(t.amount)}
+          ${t.type === 'income' ? '+' : '−'}${fmtExact(t.amount)}
         </span>
         <div class="item-actions">
           <button class="btn btn-ghost btn-icon" onclick="openEdit('transaction','${t.id}')" aria-label="Bearbeiten">✏️</button>
@@ -739,7 +760,226 @@ function renderTransactions() {
         </div>
       </div>
     </div>`;
-  }).join('');
+  }).join('') + (sorted.length > LIMIT ? `<div style="font-size:12px;color:var(--text2);text-align:center">… ${sorted.length - LIMIT} weitere – Suche verfeinern</div>` : '');
+}
+
+// ── 12-Monats-Bericht ──────────────────────────────────────────────────────
+let reportChartInst = null;
+
+function renderReport() {
+  const card = el('report-card');
+  if (!card) return;
+  const now = new Date();
+  const months = Array.from({ length: 12 }, (_, i) => monthKey(new Date(now.getFullYear(), now.getMonth() - 11 + i, 1)));
+  const totals = months.map(k => monthTotals(k));
+  const active = totals.filter(t => t.txs.length);
+  if (!active.length) {
+    if (reportChartInst) { reportChartInst.destroy(); reportChartInst = null; }
+    card.innerHTML = '<div style="font-size:13px;color:var(--text2)">Sobald du Buchungen erfasst oder importierst, siehst du hier deinen Verlauf.</div>';
+    return;
+  }
+  const avgExp = active.reduce((s, t) => s + t.expense, 0) / active.length;
+  const avgInc = active.reduce((s, t) => s + t.income, 0) / active.length;
+  const byCat = {};
+  totals.forEach(t => t.txs.filter(x => x.type !== 'income').forEach(x => { byCat[x.category] = (byCat[x.category] || 0) + x.amount; }));
+  const topCats = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const catTotal = Object.values(byCat).reduce((a, b) => a + b, 0) || 1;
+
+  card.innerHTML = `
+    <div class="kpi-grid" style="margin-bottom:12px">
+      <div class="kpi-item"><div class="kpi-label">Ø Einnahmen/Mt.</div><div class="kpi-value green">${fmtK(avgInc)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Ø Ausgaben/Mt.</div><div class="kpi-value red">${fmtK(avgExp)}</div></div>
+    </div>
+    <div class="chart-wrap" style="height:180px"><canvas id="report-chart"></canvas></div>
+    <div class="card-title" style="margin:14px 0 8px">Top-Kategorien (12 Mt.)</div>
+    ${topCats.map(([cat, amt]) => `
+      <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
+        <span>${iconFor(cat)} ${esc(cat)}</span>
+        <span><strong>${fmt(amt)}</strong> <span style="color:var(--text2)">${(amt / catTotal * 100).toFixed(0)}%</span></span>
+      </div>`).join('')}
+    <div style="font-size:11px;color:var(--text2);margin-top:6px">Basis: ${active.length} Monat${active.length === 1 ? '' : 'e'} mit Buchungen</div>`;
+
+  if (!window.Chart) return;
+  if (reportChartInst) reportChartInst.destroy();
+  reportChartInst = new Chart(el('report-chart'), {
+    type: 'bar',
+    data: {
+      labels: months.map(k => { const [y, m] = k.split('-'); return new Date(y, m - 1, 1).toLocaleDateString('de-CH', { month: 'short' }); }),
+      datasets: [
+        { label: 'Einnahmen', data: totals.map(t => t.income),  backgroundColor: '#10b981', borderRadius: 4 },
+        { label: 'Ausgaben',  data: totals.map(t => t.expense), backgroundColor: '#ef4444', borderRadius: 4 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#94a3b8', font: { size: 11 }, boxWidth: 12 } },
+        tooltip: { backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
+          callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.y) } }
+      },
+      scales: {
+        x: { ticks: { color: '#475569', font: { size: 10 }, maxRotation: 0 }, grid: { display: false } },
+        y: { ticks: { color: '#475569', font: { size: 10 }, callback: v => fmtK(v) }, grid: { color: '#273549' } }
+      }
+    }
+  });
+}
+
+// ── Bank-CSV-Import ────────────────────────────────────────────────────────
+// Schlüsselwörter für die automatische Kategorisierung (Kleinbuchstaben)
+const CATEGORY_RULES = [
+  ['Lebensmittel',   ['migros', 'coop', 'denner', 'aldi', 'lidl', 'spar ', 'volg', 'rewe', 'edeka', 'landi', 'bäckerei', 'baeckerei']],
+  ['Transport',      ['sbb', 'zvv', 'bls', 'tpg', 'postauto', 'shell', 'avia', 'tamoil', 'esso', 'bp ', 'agrola', 'parking', 'parkhaus', 'uber', 'mobility', 'tankstelle']],
+  ['Versicherungen', ['css', 'helsana', 'swica', 'sanitas', 'visana', 'concordia', 'groupe mutuel', 'assura', 'kpt', 'axa', 'mobiliar', 'allianz', 'generali', 'baloise', 'helvetia', 'krankenkasse', 'versicherung']],
+  ['Gesundheit',     ['apotheke', 'amavita', 'sunstore', 'pharmacie', 'arzt', 'zahnarzt', 'praxis', 'spital', 'drogerie']],
+  ['Wohnen',         ['miete', 'mietzins', 'verwaltung', 'ewz', 'ekz', 'strom', 'serafe', 'swisscom', 'sunrise', 'salt', 'ikea']],
+  ['Unterhaltung',   ['netflix', 'spotify', 'disney', 'youtube', 'kino', 'pathe', 'steam', 'playstation', 'nintendo', 'apple.com', 'google play']],
+  ['Kleidung',       ['zalando', 'h&m', 'zara', 'c&a', 'uniqlo', 'globus', 'bershka', 'snipes', 'ochsner']],
+  ['Freizeit',       ['restaurant', 'mcdonald', 'burger king', 'starbucks', 'cafe', 'café', 'bar ', 'fitness', 'kfc', 'pizza']],
+  ['Bildung',        ['orell', 'ex libris', 'udemy', 'schule', 'kurs', 'universität', 'hochschule']],
+  ['Haustiere',      ['fressnapf', 'qualipet', 'tierarzt']],
+  ['Lohn',           ['lohn', 'salär', 'salaer', 'salary', 'gehalt']]
+];
+
+function guessCategory(text, type) {
+  const t = ` ${text.toLowerCase()} `;
+  // 1. Gleiche Bezeichnung schon einmal erfasst → deren Kategorie übernehmen (lernt von deinen Korrekturen)
+  const prev = [...(state.transactions || [])].reverse().find(x => x.name.toLowerCase() === text.toLowerCase() && x.type === type);
+  if (prev) return prev.category;
+  for (const [cat, words] of CATEGORY_RULES) {
+    if (words.some(w => t.includes(w))) {
+      if (type === 'income') return cat === 'Lohn' ? 'Lohn' : 'Sonstiges';
+      if (cat !== 'Lohn') return cat;
+    }
+  }
+  return type === 'income' ? 'Sonstiges' : 'Ausgabe';
+}
+
+// Bank-Exporte sind oft Windows-1252 kodiert (Umlaute) – bei Fehlern neu dekodieren
+async function readTextSmart(file) {
+  const buf = await file.arrayBuffer();
+  const utf8 = new TextDecoder('utf-8').decode(buf);
+  return utf8.includes('�') ? new TextDecoder('windows-1252').decode(buf) : utf8;
+}
+
+let bankImport = null;
+
+function detectColumns(header) {
+  const find = re => header.findIndex(h => re.test(String(h).toLowerCase()));
+  return {
+    date:   find(/datum|date|valuta|abschluss/),
+    text:   find(/buchungstext|beschreibung|text|description|details|empfänger|empfaenger|mitteilung|zahlungszweck|verwendungszweck/),
+    amount: find(/^betrag|amount|betrag in|umsatz/),
+    debit:  find(/belastung|soll|debit|ausgang|lastschrift/),
+    credit: find(/gutschrift|haben|credit|eingang/)
+  };
+}
+
+async function handleBankImport(event) {
+  const input = event.target;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    const rows = parseCSV(await readTextSmart(file)).filter(r => r.some(c => c));
+    // Erste Datenzeile = erste Zeile mit Datum; Kopfzeile = Zeile davor
+    const first = rows.findIndex(r => r.some(c => parseDate(c)) && r.some(c => /\d/.test(c) && !parseDate(c) && !isNaN(parseNumber(c))));
+    if (first < 0) { toast('Keine Buchungen in der Datei erkannt'); return; }
+    const header = first > 0 ? rows[first - 1] : rows[first].map((_, i) => `Spalte ${i + 1}`);
+    const data = rows.slice(first).filter(r => r.length >= 2);
+    bankImport = { header, data, cols: detectColumns(header) };
+    openBankImportModal();
+  } catch {
+    toast('Datei konnte nicht gelesen werden');
+  }
+}
+
+function bankImportParse() {
+  const { data } = bankImport;
+  const col = id => { const v = el(id)?.value; return v === '' || v == null ? -1 : +v; };
+  const c = { date: col('bi-date'), text: col('bi-text'), amount: col('bi-amount'), debit: col('bi-debit'), credit: col('bi-credit') };
+  const out = [];
+  for (const r of data) {
+    const date = parseDate(r[c.date]);
+    if (!date) continue;
+    let value;
+    if (c.amount >= 0) value = parseNumber(r[c.amount]);
+    else {
+      const d = parseNumber(r[c.debit]), cr = parseNumber(r[c.credit]);
+      value = (isNaN(cr) ? 0 : Math.abs(cr)) - (isNaN(d) ? 0 : Math.abs(d));
+    }
+    if (isNaN(value) || value === 0) continue;
+    const name = (String(r[c.text] ?? '').replace(/\s+/g, ' ').trim() || 'Buchung').slice(0, 80);
+    const type = value > 0 ? 'income' : 'expense';
+    out.push({ date, name, type, amount: Math.round(Math.abs(value) * 100) / 100, category: guessCategory(name, type) });
+  }
+  const isDup = t => (state.transactions || []).some(x => x.date === t.date && x.amount === t.amount && x.type === t.type && x.name === t.name);
+  return { items: out.filter(t => !isDup(t)), dups: out.filter(isDup).length };
+}
+
+function updateBankImportPreview() {
+  const { items, dups } = bankImportParse();
+  const inc = items.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+  const exp = items.filter(t => t.type !== 'income').reduce((s, t) => s + t.amount, 0);
+  el('bi-preview').innerHTML = items.length ? `
+    <div style="font-size:13px;margin-bottom:6px"><strong>${items.length}</strong> Buchungen erkannt${dups ? ` · ${dups} Duplikate übersprungen` : ''}</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px">Einnahmen <span style="color:var(--green)">${fmt(inc)}</span> · Ausgaben <span style="color:var(--red)">${fmt(exp)}</span></div>
+    ${items.slice(0, 4).map(t => `<div class="upcoming-row" style="margin-bottom:4px">
+      <span class="upcoming-name">${iconFor(t.category)} ${esc(t.name)}</span>
+      <span style="font-weight:600;color:${t.type === 'income' ? 'var(--green)' : 'var(--red)'}">${t.type === 'income' ? '+' : '−'}${fmtExact(t.amount)}</span></div>`).join('')}`
+    : dups
+      ? `<div style="font-size:13px;color:var(--text2)">Alle ${dups} Buchungen sind bereits vorhanden – nichts Neues zu importieren.</div>`
+      : `<div style="font-size:13px;color:var(--red)">Keine gültigen Buchungen – prüfe die Spaltenzuordnung.</div>`;
+  el('bi-split-wrap').style.display = el('bi-amount').value === '' ? '' : 'none';
+}
+
+function openBankImportModal() {
+  const { header, cols } = bankImport;
+  const opts = (sel, allowNone) => (allowNone ? `<option value="">— keine —</option>` : '') +
+    header.map((h, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${esc(h || 'Spalte ' + (i + 1))}</option>`).join('');
+  const hasSplit = cols.amount < 0 && (cols.debit >= 0 || cols.credit >= 0);
+  showModal(`
+  <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
+    <div class="modal">
+      <div class="modal-title">🏦 Bank-CSV importieren</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px">Ordne die Spalten zu. Kategorien werden automatisch vergeben und lernen aus deinen Korrekturen.</div>
+      <div style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>Datum</label><select id="bi-date" onchange="updateBankImportPreview()">${opts(Math.max(0, cols.date))}</select></div>
+        <div class="field" style="flex:1"><label>Beschreibung</label><select id="bi-text" onchange="updateBankImportPreview()">${opts(Math.max(0, cols.text))}</select></div>
+      </div>
+      <div class="field"><label>Betrag (eine Spalte, +/−)</label>
+        <select id="bi-amount" onchange="updateBankImportPreview()">${opts(hasSplit ? -1 : cols.amount, true)}</select>
+      </div>
+      <div id="bi-split-wrap" style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>Belastung</label><select id="bi-debit" onchange="updateBankImportPreview()">${opts(cols.debit, true)}</select></div>
+        <div class="field" style="flex:1"><label>Gutschrift</label><select id="bi-credit" onchange="updateBankImportPreview()">${opts(cols.credit, true)}</select></div>
+      </div>
+      ${state.accounts.length ? `
+      <div class="field"><label>Konto zuordnen (optional)</label>
+        <select id="m-account">${accountOptions(null)}</select>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px">Der Kontosaldo wird dabei nicht verändert – er stammt ja bereits von der Bank.</div>
+      </div>` : ''}
+      <div id="bi-preview" style="margin:6px 0 4px"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
+        <button class="btn btn-primary" onclick="confirmBankImport()">Importieren</button>
+      </div>
+    </div>
+  </div>`);
+  updateBankImportPreview();
+}
+
+function confirmBankImport() {
+  const { items } = bankImportParse();
+  if (!items.length) { toast('Nichts zu importieren'); return; }
+  const accountId = el('m-account')?.value || null;
+  if (!state.transactions) state.transactions = [];
+  for (const t of items) state.transactions.push({ id: uid(), ...t, note: '', accountId, noBalance: !!accountId });
+  txMonth = items.map(t => t.date).sort().pop().slice(0, 7);
+  bankImport = null;
+  saveState(); closeModal(); toast(`${items.length} Buchungen importiert ✓`);
+  refreshCurrent();
 }
 
 // ── Vermögen (Investitionen + Schulden) ────────────────────────────────────
@@ -971,12 +1211,32 @@ function parseDate(v) {
   return null;
 }
 
+// CSV mit Anführungszeichen (z.B. "Coop, Zürich") korrekt zerlegen
 function parseCSV(text) {
-  const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim());
-  if (!lines.length) return [];
-  const sample = lines[0];
+  text = text.replace(/^\uFEFF/, '');
+  // Trennzeichen anhand der ersten Zeilen erkennen (Bank-Exporte haben oft Kopfzeilen davor)
+  const sample = text.split(/\r?\n/, 10).join('\n');
   const delim = [';', '\t', ','].reduce((best, d) => sample.split(d).length > sample.split(best).length ? d : best, ';');
-  return lines.map(l => l.split(delim).map(c => c.trim().replace(/^"|"$/g, '')));
+  const rows = [];
+  let row = [], cell = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === delim) { row.push(cell.trim()); cell = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell.trim()); cell = '';
+      if (row.some(c => c)) rows.push(row);
+      row = [];
+    } else cell += ch;
+  }
+  row.push(cell.trim());
+  if (row.some(c => c)) rows.push(row);
+  return rows;
 }
 
 function rowsToHistory(rows) {
@@ -2107,7 +2367,11 @@ function openSettings() {
         </select>
       </div>
       <div style="height:1px;background:var(--border);margin:14px 0"></div>
+      <div class="card-title" style="margin-bottom:10px">Sicherheit</div>
+      <button class="btn btn-ghost btn-full" onclick="openPinSetup()">🔒 ${state.settings.pinHash ? 'PIN ändern / entfernen' : 'App-Sperre mit PIN einrichten'}</button>
+      <div style="height:1px;background:var(--border);margin:14px 0"></div>
       <div class="card-title" style="margin-bottom:10px">Daten-Backup</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">Deine Daten liegen nur auf diesem Gerät. Letztes Backup: <strong style="color:var(--text)">${state.settings.lastBackup ? new Date(state.settings.lastBackup).toLocaleDateString('de-CH') : 'noch nie'}</strong></div>
       <button class="btn btn-ghost btn-full" onclick="exportData()">⬇️ Exportieren (JSON)</button>
       <button class="btn btn-ghost btn-full" style="margin-top:8px" onclick="exportTransactionsCSV()">📊 Buchungen als CSV (Excel)</button>
       <div style="margin-top:8px">
@@ -2134,8 +2398,147 @@ function saveSettings() {
 function exportData() {
   const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = 'finanzplaner-backup.json'; a.click();
-  URL.revokeObjectURL(url); toast('Exportiert ✓');
+  const a = document.createElement('a'); a.href = url; a.download = `finanzplaner-backup-${localISO()}.json`; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  state.settings.lastBackup = Date.now();
+  state.settings.backupSnooze = 0;
+  saveState(); toast('Backup gespeichert ✓');
+  if (currentPage === 'uebersicht') renderBackupHint();
+}
+
+// ── Backup-Erinnerung ──────────────────────────────────────────────────────
+function renderBackupHint() {
+  const box = el('dash-backup-hint');
+  if (!box) return;
+  const items = state.accounts.length + state.income.length + state.expenses.length + (state.transactions || []).length + state.goals.length;
+  const last = state.settings.lastBackup || 0;
+  const due = items >= 5 && Date.now() - last > 30 * 864e5 && Date.now() > (state.settings.backupSnooze || 0);
+  box.innerHTML = due ? `
+    <div class="card backup-hint">
+      <div style="font-size:14px;font-weight:600;margin-bottom:4px">💾 Zeit für ein Backup</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px">${last ? 'Dein letztes Backup ist über 30 Tage alt.' : 'Du hast noch nie ein Backup gemacht.'} Deine Daten liegen nur auf diesem Gerät – geht es verloren, sind sie weg.</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" style="flex:1" onclick="exportData()">Jetzt sichern</button>
+        <button class="btn btn-ghost" onclick="snoozeBackup()">Später</button>
+      </div>
+    </div>` : '';
+}
+
+function snoozeBackup() {
+  state.settings.backupSnooze = Date.now() + 7 * 864e5;
+  saveState(); renderBackupHint();
+}
+
+// ── Privatsphäre-Modus (Beträge verbergen) ─────────────────────────────────
+function applyPrivacy() {
+  document.body.classList.toggle('privacy', !!state.settings.privacy);
+  const btn = el('privacy-btn');
+  if (btn) { btn.textContent = state.settings.privacy ? '🙈' : '👁'; btn.setAttribute('aria-pressed', !!state.settings.privacy); }
+}
+
+function togglePrivacy() {
+  state.settings.privacy = !state.settings.privacy;
+  saveState(); applyPrivacy();
+  toast(state.settings.privacy ? 'Beträge verborgen' : 'Beträge sichtbar');
+}
+
+// ── App-Sperre (PIN) ───────────────────────────────────────────────────────
+// Hinweis: schützt vor neugierigen Blicken, verschlüsselt die Daten aber nicht.
+async function hashPin(pin) {
+  const data = new TextEncoder().encode('finanzplaner:' + pin);
+  const buf = await crypto.subtle.digest('SHA-256', data);
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function openPinSetup() {
+  const has = !!state.settings.pinHash;
+  showModal(`
+  <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
+    <div class="modal">
+      <div class="modal-title">🔒 App-Sperre</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.5">
+        Die App fragt beim Öffnen und nach 1 Minute im Hintergrund nach der PIN.
+        Schutz vor neugierigen Blicken – die Daten selbst werden nicht verschlüsselt.
+      </div>
+      <div class="field"><label>Neue PIN (4–8 Ziffern)</label>
+        <input id="m-pin1" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off">
+      </div>
+      <div class="field"><label>PIN wiederholen</label>
+        <input id="m-pin2" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off">
+      </div>
+      ${has ? `<button class="btn btn-danger btn-full" onclick="removePin()">PIN entfernen</button>` : ''}
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
+        <button class="btn btn-primary" onclick="savePin()">PIN speichern</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+async function savePin() {
+  const p1 = el('m-pin1').value, p2 = el('m-pin2').value;
+  if (!/^\d{4,8}$/.test(p1)) { toast('PIN muss 4–8 Ziffern haben'); return; }
+  if (p1 !== p2) { toast('PINs stimmen nicht überein'); return; }
+  state.settings.pinHash = await hashPin(p1);
+  state.settings.pinLength = p1.length;
+  saveState(); closeModal(); toast('App-Sperre aktiviert 🔒');
+}
+
+function removePin() {
+  if (!confirm('App-Sperre wirklich entfernen?')) return;
+  state.settings.pinHash = null;
+  state.settings.pinLength = null;
+  saveState(); closeModal(); toast('App-Sperre entfernt');
+}
+
+let pinEntry = '';
+let pinFails = 0;
+
+function showLockScreen() {
+  if (!state.settings.pinHash || el('lock-screen')) return;
+  pinEntry = '';
+  const keys = ['1','2','3','4','5','6','7','8','9','','0','⌫'];
+  document.body.insertAdjacentHTML('beforeend', `
+  <div id="lock-screen" class="lock-screen" role="dialog" aria-label="App gesperrt">
+    <div style="font-size:40px">🔒</div>
+    <div style="font-size:18px;font-weight:700;margin-top:8px">FinanzPlaner</div>
+    <div style="font-size:13px;color:var(--text2);margin-top:4px" id="lock-msg">PIN eingeben</div>
+    <div class="pin-dots" id="pin-dots"></div>
+    <div class="pin-pad">
+      ${keys.map(k => k ? `<button class="pin-key" onclick="pinKey('${k}')">${k}</button>` : '<span></span>').join('')}
+    </div>
+  </div>`);
+  document.body.classList.add('modal-open');
+  updatePinDots();
+}
+
+function updatePinDots() {
+  const dots = el('pin-dots');
+  if (dots) dots.innerHTML = Array.from({ length: state.settings.pinLength || 4 }, (_, i) => `<span class="${i < pinEntry.length ? 'on' : ''}"></span>`).join('');
+}
+
+async function pinKey(k) {
+  if (k === '⌫') pinEntry = pinEntry.slice(0, -1);
+  else if (pinEntry.length < 8) pinEntry += k;
+  updatePinDots();
+  if (pinEntry.length < (state.settings.pinLength || 4)) return;
+  if (await hashPin(pinEntry) === state.settings.pinHash) {
+    pinFails = 0;
+    el('lock-screen')?.remove();
+    if (!el('modal-backdrop')) document.body.classList.remove('modal-open');
+  } else {
+    pinWrong();
+  }
+}
+
+function pinWrong() {
+  pinFails++;
+  pinEntry = '';
+  updatePinDots();
+  const msg = el('lock-msg');
+  if (msg) msg.textContent = 'Falsche PIN' + (pinFails >= 3 ? ' – vergessen? Daten nur per Backup wiederherstellbar' : '');
+  el('pin-dots')?.classList.add('shake');
+  setTimeout(() => el('pin-dots')?.classList.remove('shake'), 400);
 }
 
 function exportTransactionsCSV() {
@@ -2158,7 +2561,7 @@ function importData(e) {
   const file = e.target.files?.[0]; if (!file) return;
   const reader = new FileReader();
   reader.onload = ev => {
-    try { state = migrateState(JSON.parse(ev.target.result)); saveState(); closeModal(); toast('Importiert ✓'); navigate('uebersicht'); }
+    try { state = migrateState(JSON.parse(ev.target.result)); saveState(); closeModal(); applyPrivacy(); toast('Importiert ✓'); navigate('uebersicht'); }
     catch { toast('Fehler beim Importieren'); }
   };
   reader.readAsText(file);
@@ -2166,7 +2569,7 @@ function importData(e) {
 
 function resetData() {
   if (!confirm('Wirklich alle Daten löschen? Nicht rückgängig machbar.')) return;
-  state = migrateState(null); saveState(); closeModal(); toast('Daten gelöscht'); navigate('uebersicht');
+  state = migrateState(null); saveState(); closeModal(); applyPrivacy(); toast('Daten gelöscht'); navigate('uebersicht');
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
@@ -2176,6 +2579,15 @@ function boot() {
     Chart.defaults.animation.duration = isTouch ? 250 : 400;
     Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
   }
+  applyPrivacy();
+  showLockScreen();
+  // Browser bitten, die Daten nicht automatisch zu löschen (wichtig v.a. auf iOS/Safari)
+  navigator.storage?.persist?.().catch(() => {});
+  let hiddenAt = 0;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) hiddenAt = Date.now();
+    else if (hiddenAt && Date.now() - hiddenAt > 60e3) showLockScreen();
+  });
   autoNetworthSnapshot();
   const start = PAGES.includes(pageFromHash()) ? pageFromHash() : 'uebersicht';
   history.replaceState({ page: start }, '', '#' + start);
