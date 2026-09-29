@@ -17,6 +17,8 @@ const DEFAULT_STATE = {
   contracts: [],
   wishlist: [],
   tagBudgets: {},
+  milestones: [],
+  streak: { history: {}, startKey: null },
   settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0, taxEstimate: null, taxCanton: 'ZH',
               privacy: false, pinHash: null, pinLength: null, lastBackup: 0, backupSnooze: 0,
               // v2: Budgetmonat & Lohn
@@ -25,11 +27,13 @@ const DEFAULT_STATE = {
               grossCalc: { a: 0, b: 0, n: 12, compare: false },
               // v4: Entscheidungshilfen
               workPriceEnabled: true, workHoursPerWeek: 42, workPriceThreshold: 50,
-              wishWaitDays: 30, likRate: null }
+              wishWaitDays: 30, likRate: null,
+              // v5: Motivation
+              savingsGoalType: 'pct', savingsGoalValue: 20, milestonesInit: false, hadDebt: false }
 };
 
 // Aktuelle Version des Datenmodells. Jede Erhöhung braucht einen Schritt in MIGRATIONS.
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 // ── Kontotypen ─────────────────────────────────────────────────────────────
 const ACCOUNT_TYPES = {
@@ -107,7 +111,9 @@ const MIGRATIONS = {
   //     warrantyUntil + receiptIds
   3: st => { st.contracts = st.contracts || []; },
   // v4: Wunschliste, Projekt-Budgets pro Tag; Buchungen/Ausgaben erhalten optional tags[]
-  4: st => { st.wishlist = st.wishlist || []; st.tagBudgets = st.tagBudgets || {}; }
+  4: st => { st.wishlist = st.wishlist || []; st.tagBudgets = st.tagBudgets || {}; },
+  // v5: Spar-Serien (Auswertung pro abgeschlossenem Budgetmonat) und Meilensteine
+  5: st => { st.milestones = st.milestones || []; st.streak = st.streak || { history: {}, startKey: null }; }
 };
 
 function migrateState(raw) {
