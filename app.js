@@ -12,6 +12,7 @@ const DEFAULT_STATE = {
   portfolioValue: 0,
   networthHistory: [],
   transactions: [],
+  portfolioHistory: [],
   settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0, taxEstimate: null, taxCanton: 'ZH' }
 };
 
@@ -23,7 +24,6 @@ function migrateState(raw) {
       : [];
     delete raw.balance;
   }
-  delete raw.portfolioHistory;
   return {
     ...JSON.parse(JSON.stringify(DEFAULT_STATE)),
     ...raw,
@@ -45,12 +45,18 @@ let editContext     = null;
 let chartMode       = 'nominal';
 let projectionYears = 10;
 
-function saveState() { localStorage.setItem('finanzplaner', JSON.stringify(state)); }
+function saveState() {
+  try { localStorage.setItem('finanzplaner', JSON.stringify(state)); }
+  catch { toast('⚠️ Speichern fehlgeschlagen (Speicher voll oder privater Modus)'); }
+}
+
+// Benutzereingaben sicher in HTML einsetzen (verhindert kaputtes Layout / XSS)
+const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ESC_MAP[c]);
 
 // ── Formatierung ───────────────────────────────────────────────────────────
-function fmt(n) {
-  return new Intl.NumberFormat('de-CH', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(n) + ' ' + state.currency;
-}
+const NUM_FMT = new Intl.NumberFormat('de-CH', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+function fmt(n) { return NUM_FMT.format(n) + ' ' + state.currency; }
 function fmtK(n) {
   if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M ' + state.currency;
   if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(0) + 'k ' + state.currency;
@@ -94,8 +100,9 @@ function fireETA() {
   const target = fireNumber();
   if (target <= 0 || totalInvestments() <= 0) return null;
   const r = weightedReturn() / 100 / 12;
+  const pmt = totalInvestments();
   let p = state.portfolioValue;
-  for (let m = 1; m <= 720; m++) { p = p * (1 + r) + totalInvestments(); if (p >= target) return m; }
+  for (let m = 1; m <= 720; m++) { p = p * (1 + r) + pmt; if (p >= target) return m; }
   return null;
 }
 
@@ -233,18 +240,31 @@ function toast(msg) {
 const PAGES = ['uebersicht','einkommen','ausgaben','vermoegen','ziele'];
 const RENDERERS = {};
 
-function navigate(id) {
+let currentPage = null;
+
+function navigate(id, { push = true } = {}) {
+  if (!PAGES.includes(id)) id = 'uebersicht';
+  const changed = id !== currentPage;
+  currentPage = id;
   PAGES.forEach(p => {
     document.getElementById('page-' + p).classList.toggle('active', p === id);
     document.getElementById('nav-'  + p).classList.toggle('active', p === id);
   });
+  // Browser-Verlauf: Zurück-Taste (Android) wechselt Seiten statt die App zu schliessen
+  if (push && changed && location.hash !== '#' + id) history.pushState({ page: id }, '', '#' + id);
+  if (changed) {
+    window.scrollTo(0, 0);
+    document.getElementById('page-' + id).scrollTop = 0;
+  }
   RENDERERS[id]?.();
 }
 
+// Nur die sichtbare Seite neu zeichnen – versteckte Seiten werden beim Öffnen gerendert
 function refreshCurrent() {
-  const active = PAGES.find(p => document.getElementById('page-' + p).classList.contains('active'));
-  if (active) navigate(active);
+  if (currentPage) RENDERERS[currentPage]?.();
 }
+
+const pageFromHash = () => (location.hash || '').slice(1);
 
 const el = id => document.getElementById(id);
 
@@ -315,7 +335,7 @@ RENDERERS.uebersicht = function() {
 function renderDonutChart() {
   const canvas = el('donut-chart');
   const legend = el('dash-donut-legend');
-  if (!canvas || !legend) return;
+  if (!canvas || !legend || !window.Chart) return;
 
   const catMap = {};
   state.expenses.forEach(e => { catMap[e.category] = (catMap[e.category] || 0) + monthlyAmt(e); });
@@ -381,7 +401,7 @@ function renderNetworthHistoryChart() {
 
   setTimeout(() => {
     const canvas = el('nw-hist-canvas');
-    if (!canvas) return;
+    if (!canvas || !window.Chart) return;
     if (nwHistChartInst) nwHistChartInst.destroy();
     nwHistChartInst = new Chart(canvas, {
       type: 'line',
@@ -407,7 +427,7 @@ function renderNetworthHistoryChart() {
 
 function renderProjectionChart() {
   const canvas = el('projection-chart');
-  if (!canvas) return;
+  if (!canvas || !window.Chart) return;
   const months = projectionYears * 12, labels = [], balData = [], invData = [], totalData = [];
   let bal = totalAccounts(), inv = state.portfolioValue;
   const sav = Math.max(0, monthlySavings()), pmt = totalInvestments();
@@ -421,7 +441,13 @@ function renderProjectionChart() {
     const adj = chartMode === 'real' ? Math.pow(1 + inf, m) : 1;
     balData.push(Math.round(bal / adj)); invData.push(Math.round(inv / adj)); totalData.push(Math.round((bal + inv) / adj));
   }
-  if (projectionChart) projectionChart.destroy();
+  if (projectionChart) {
+    // Bestehenden Chart aktualisieren statt neu aufzubauen (schneller, kein Flackern)
+    projectionChart.data.labels = labels;
+    [balData, invData, totalData].forEach((d, i) => { projectionChart.data.datasets[i].data = d; });
+    projectionChart.update();
+    return;
+  }
   projectionChart = new Chart(canvas, {
     type: 'line',
     data: { labels, datasets: [
@@ -467,7 +493,7 @@ RENDERERS.einkommen = function() {
   list.innerHTML = state.income.length
     ? state.income.map(i => listItem({
         icon: iconFor(i.category), color: colorFor(i.category),
-        name: i.name, sub: i.category + (i.note ? ' · ' + i.note : ''),
+        name: esc(i.name), sub: i.category + (i.note ? ' · ' + esc(i.note) : ''),
         amount: fmt(i.amount), amountColor: 'var(--green)', id: i.id, type: 'income'
       })).join('')
     : emptyState('💼', 'Noch keine Einnahmen erfasst.');
@@ -516,7 +542,7 @@ RENDERERS.ausgaben = function() {
           <div class="item-left">
             <div class="item-icon" style="background:${colorFor(e.category)}22">${iconFor(e.category)}</div>
             <div style="min-width:0">
-              <div class="item-name">${e.name} ${freqLabel}</div>
+              <div class="item-name">${esc(e.name)} ${freqLabel}</div>
               <div class="item-sub">${e.category} · ${pct}% Einkomm.${hasLim ? ' · Limit ' + fmt(e.budgetLimit) : ''}</div>
               ${hasLim ? `<div class="budget-bar"><div class="budget-fill ${bCls}" style="width:${bpct}%"></div></div>` : ''}
             </div>
@@ -549,7 +575,7 @@ function renderTransactions() {
       <div class="item-left">
         <div class="item-icon" style="background:rgba(100,116,139,.15)">${t.type === 'income' ? '💰' : '💸'}</div>
         <div style="min-width:0">
-          <div class="item-name">${t.name}</div>
+          <div class="item-name">${esc(t.name)}</div>
           <div class="item-sub">${t.category || '–'} · ${new Date(t.date).toLocaleDateString('de-CH')}</div>
         </div>
       </div>
@@ -570,6 +596,7 @@ RENDERERS.vermoegen = function renderVermoegen() {
   renderVermoegenSummary();
   renderInvestSection();
   renderDebtSection();
+  renderDepotSection();
 };
 
 function renderVermoegenSummary() {
@@ -636,7 +663,7 @@ function renderInvestSection() {
   ilist.innerHTML = state.investments.length
     ? state.investments.map(i => listItem({
         icon: iconFor(i.category), color: colorFor(i.category),
-        name: i.name, sub: i.category + ' · Ø ' + (i.returnRate || 6) + '% p.a.',
+        name: esc(i.name), sub: i.category + ' · Ø ' + (i.returnRate || 6) + '% p.a.',
         amount: fmt(i.amount) + '/Mt.', amountColor: 'var(--blue)', id: i.id, type: 'investment'
       })).join('')
     : emptyState('📈', 'Noch keine Investitionen erfasst.');
@@ -663,7 +690,7 @@ function renderDebtSection() {
           <div>
             <div class="strat-label">Avalanche</div>
             <div class="strat-desc">Höchste Zinsen zuerst zahlen → spart am meisten</div>
-            <div class="strat-target">${byInterest.name} · ${byInterest.interestRate}% p.a.</div>
+            <div class="strat-target">${esc(byInterest.name)} · ${byInterest.interestRate}% p.a.</div>
           </div>
         </div>
         <div class="strat-item">
@@ -671,7 +698,7 @@ function renderDebtSection() {
           <div>
             <div class="strat-label">Snowball</div>
             <div class="strat-desc">Kleinste Schuld zuerst → motivierender</div>
-            <div class="strat-target">${byAmount.name} · ${fmtK(byAmount.remainingAmount)}</div>
+            <div class="strat-target">${esc(byAmount.name)} · ${fmtK(byAmount.remainingAmount)}</div>
           </div>
         </div>
       </div>
@@ -683,11 +710,11 @@ function renderDebtSection() {
   // Schuldenliste
   const dlist = el('debt-list');
   const strat = el('debt-strategy-section');
+  if (strat) strat.style.display = state.debts.length ? 'block' : 'none';
   if (!state.debts.length) {
     dlist.innerHTML = emptyState('🏦', 'Keine Schulden – sehr gut!');
     return;
   }
-  if (strat) strat.style.display = 'block';
 
   dlist.innerHTML = state.debts.map(d => {
     const months = debtPayoffMonths(d);
@@ -699,7 +726,7 @@ function renderDebtSection() {
       <div class="item-left">
         <div class="item-icon" style="background:rgba(239,68,68,.15)">${iconFor(d.category)}</div>
         <div style="min-width:0">
-          <div class="item-name">${d.name}</div>
+          <div class="item-name">${esc(d.name)}</div>
           <div class="item-sub">${d.category} · ${d.interestRate}% Zins · ${fmt(d.monthlyPayment)}/Mt.</div>
           <div style="margin-top:6px">
             <div class="budget-bar"><div class="budget-fill budget-ok" style="width:${pct}%"></div></div>
@@ -732,7 +759,7 @@ function renderAccountsInVermoegen() {
       <div class="item-left">
         <div class="item-icon" style="background:rgba(99,102,241,.15)">${typeIcon[a.type] || '💳'}</div>
         <div>
-          <div class="item-name">${a.name}</div>
+          <div class="item-name">${esc(a.name)}</div>
           <div class="item-sub">${typeLabel[a.type] || a.type}</div>
         </div>
       </div>
@@ -740,10 +767,166 @@ function renderAccountsInVermoegen() {
         <span class="item-amount" style="color:${a.balance >= 0 ? 'var(--green)' : 'var(--red)'}">${fmt(a.balance)}</span>
         <div class="item-actions">
           <button class="btn btn-ghost btn-icon" onclick="openEdit('account','${a.id}')">✏️</button>
-          <button class="btn btn-danger btn-icon" onclick="deleteItem('account','${a.id}');RENDERERS.vermoegen();RENDERERS.uebersicht()">🗑️</button>
+          <button class="btn btn-danger btn-icon" onclick="deleteItem('account','${a.id}')">🗑️</button>
         </div>
       </div>
     </div>`).join('');
+}
+
+// ── Depot-Import (CSV / Excel) ─────────────────────────────────────────────
+let depotChartInst = null;
+const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+
+// Excel-Bibliothek erst bei Bedarf laden – spart ~900 KB beim App-Start
+function loadXLSX() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = XLSX_URL; s.async = true;
+    s.onload = () => resolve(window.XLSX);
+    s.onerror = () => reject(new Error('XLSX konnte nicht geladen werden'));
+    document.head.appendChild(s);
+  });
+}
+
+// Akzeptiert 12'345.50 · 12.345,50 · 12,345.50 · CHF 1 234
+function parseNumber(v) {
+  if (typeof v === 'number') return v;
+  let s = String(v ?? '').replace(/[^\d.,\-]/g, '');
+  if (!s) return NaN;
+  const lastDot = s.lastIndexOf('.'), lastComma = s.lastIndexOf(',');
+  if (lastComma > lastDot) s = s.replace(/\./g, '').replace(',', '.');
+  else s = s.replace(/,/g, '');
+  return parseFloat(s);
+}
+
+// Akzeptiert 2024-01-31 · 31.01.2024 · 31/01/24 · Excel-Seriennummern · Date-Objekte
+function parseDate(v) {
+  if (v instanceof Date && !isNaN(v)) {
+    return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+  }
+  if (typeof v === 'number' && v > 20000 && v < 80000) {
+    return new Date(Math.round((v - 25569) * 864e5)).toISOString().slice(0, 10);
+  }
+  const s = String(v ?? '').trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  m = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/);
+  if (m) {
+    const y = m[3].length === 2 ? '20' + m[3] : m[3];
+    return `${y}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  }
+  return null;
+}
+
+function parseCSV(text) {
+  const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim());
+  if (!lines.length) return [];
+  const sample = lines[0];
+  const delim = [';', '\t', ','].reduce((best, d) => sample.split(d).length > sample.split(best).length ? d : best, ';');
+  return lines.map(l => l.split(delim).map(c => c.trim().replace(/^"|"$/g, '')));
+}
+
+function rowsToHistory(rows) {
+  const out = [];
+  for (const r of rows) {
+    const date = parseDate(r[0]);
+    const value = parseNumber(r[1]);
+    if (!date || isNaN(value)) continue; // Kopfzeile oder ungültige Zeile
+    const invested = parseNumber(r[2]);
+    out.push({ date, value, invested: isNaN(invested) ? null : invested });
+  }
+  const byDate = new Map(out.map(h => [h.date, h]));
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function handlePortfolioUpload(event) {
+  const input = event.target;
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    let rows;
+    if (/\.csv$/i.test(file.name)) {
+      rows = parseCSV(await file.text());
+    } else {
+      toast('Lade Excel-Import…');
+      const XLSX = await loadXLSX();
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true });
+    }
+    const history = rowsToHistory(rows);
+    if (!history.length) { toast('Keine gültigen Zeilen gefunden (A = Datum, B = Wert)'); return; }
+    state.portfolioHistory = history;
+    state.portfolioValue = history[history.length - 1].value;
+    saveState();
+    toast(`${history.length} Einträge importiert ✓`);
+    refreshCurrent();
+  } catch (err) {
+    toast(navigator.onLine ? 'Datei konnte nicht gelesen werden' : 'Excel-Import braucht Internet – nutze CSV');
+  } finally {
+    input.value = ''; // gleiche Datei erneut wählbar
+  }
+}
+
+function clearPortfolioHistory() {
+  if (!confirm('Importierte Depot-Historie löschen?')) return;
+  state.portfolioHistory = [];
+  saveState(); toast('Gelöscht'); refreshCurrent();
+}
+
+function renderDepotSection() {
+  const section = el('depot-chart-section');
+  const hist = state.portfolioHistory || [];
+  if (!section) return;
+  if (!hist.length) {
+    section.style.display = 'none';
+    if (depotChartInst) { depotChartInst.destroy(); depotChartInst = null; }
+    return;
+  }
+  section.style.display = 'block';
+
+  const first = hist[0], last = hist[hist.length - 1];
+  const invested = last.invested;
+  const gain = invested != null ? last.value - invested : last.value - first.value;
+  const base = invested != null ? invested : first.value;
+  const gainPct = base ? gain / base * 100 : 0;
+  const up = gain >= 0;
+  const col = up ? 'var(--green)' : 'var(--red)';
+  el('depot-stats').innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi-item"><div class="kpi-label">Aktueller Wert</div><div class="kpi-value">${fmtK(last.value)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">${invested != null ? 'Gewinn/Verlust' : 'Veränderung'}</div>
+        <div class="kpi-value" style="color:${col}">${up ? '+' : ''}${fmtK(gain)} <span style="font-size:12px">(${up ? '+' : ''}${gainPct.toFixed(1)}%)</span></div></div>
+    </div>
+    <div style="font-size:11px;color:var(--text2);margin-top:6px">${hist.length} Einträge · ${new Date(first.date).toLocaleDateString('de-CH')} – ${new Date(last.date).toLocaleDateString('de-CH')}</div>`;
+
+  const canvas = el('depot-chart');
+  if (!canvas || !window.Chart) return;
+  const labels = hist.map(h => new Date(h.date).toLocaleDateString('de-CH', { month: 'short', year: '2-digit' }));
+  const datasets = [{ label: 'Depotwert', data: hist.map(h => h.value), borderColor: '#10b981',
+    backgroundColor: 'rgba(16,185,129,.1)', fill: true, tension: .3, pointRadius: hist.length > 40 ? 0 : 2, borderWidth: 2 }];
+  if (hist.some(h => h.invested != null)) {
+    datasets.push({ label: 'Eingesetzt', data: hist.map(h => h.invested), borderColor: '#6366f1',
+      backgroundColor: 'transparent', fill: false, tension: .3, pointRadius: 0, borderWidth: 2, borderDash: [4, 3], spanGaps: true });
+  }
+  if (depotChartInst) depotChartInst.destroy();
+  depotChartInst = new Chart(canvas, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: datasets.length > 1, labels: { color: '#94a3b8', font: { size: 11 }, boxWidth: 12 } },
+        tooltip: { backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
+          callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.y) } }
+      },
+      scales: {
+        x: { ticks: { color: '#475569', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 6 }, grid: { color: '#1e293b' } },
+        y: { ticks: { color: '#475569', font: { size: 10 }, callback: v => fmtK(v) }, grid: { color: '#273549' } }
+      }
+    }
+  });
 }
 
 // ── Ziele ──────────────────────────────────────────────────────────────────
@@ -920,7 +1103,7 @@ function renderGoals() {
     <div class="card goal-card-done">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
-          <div style="font-size:16px;font-weight:700">${g.icon || '🎯'} ${g.name}</div>
+          <div style="font-size:16px;font-weight:700">${g.icon || '🎯'} ${esc(g.name)}</div>
           <div style="font-size:13px;color:var(--green);margin-top:3px;font-weight:600">🎉 Ziel erreicht · ${fmt(g.currentAmount)}</div>
         </div>
         <div style="display:flex;gap:5px">
@@ -952,7 +1135,7 @@ function renderGoals() {
     <div class="card goal-card-new">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
         <div>
-          <div style="font-size:16px;font-weight:700">${g.icon || '🎯'} ${g.name}</div>
+          <div style="font-size:16px;font-weight:700">${g.icon || '🎯'} ${esc(g.name)}</div>
           <div style="font-size:13px;color:var(--text2);margin-top:2px">${fmt(g.currentAmount)} von ${fmt(g.targetAmount)}</div>
         </div>
         <div style="display:flex;gap:5px">
@@ -1043,13 +1226,31 @@ function deleteItem(type, id) {
 }
 
 // ── Modal-Basis ────────────────────────────────────────────────────────────
-function closeModal() { el('modal-backdrop')?.remove(); editContext = null; }
+const isTouch = window.matchMedia('(pointer: coarse)').matches;
+let ignoreNextPop = false;
+
+function removeModal() {
+  el('modal-backdrop')?.remove();
+  document.body.classList.remove('modal-open');
+  editContext = null;
+}
+
+function closeModal() {
+  removeModal();
+  // Verlaufseintrag des Modals entfernen – verzögert, da oft direkt ein neues Modal folgt
+  setTimeout(() => {
+    if (!el('modal-backdrop') && history.state?.modal) { ignoreNextPop = true; history.back(); }
+  }, 0);
+}
 function handleBackdropClick(e) { if (e.target.id === 'modal-backdrop') closeModal(); }
 
 function showModal(html) {
   el('modal-backdrop')?.remove();
   document.body.insertAdjacentHTML('beforeend', html);
-  setTimeout(() => document.querySelector('.modal input, .modal select')?.focus(), 50);
+  document.body.classList.add('modal-open');
+  if (!history.state?.modal) history.pushState({ modal: true, page: currentPage }, '', location.hash);
+  // Auf dem Handy nicht automatisch fokussieren – sonst springt sofort die Tastatur auf
+  if (!isTouch) setTimeout(() => document.querySelector('.modal input:not([type=hidden]), .modal select')?.focus(), 50);
 }
 
 function openEdit(type, id) {
@@ -1076,7 +1277,7 @@ function openAccountsModal() {
                   ${{ checking:'💳', savings:'🏦', depot:'📈', other:'💰' }[a.type] || '💳'}
                 </div>
                 <div>
-                  <div class="item-name">${a.name}</div>
+                  <div class="item-name">${esc(a.name)}</div>
                   <div class="item-sub">${{ checking:'Girokonto', savings:'Sparkonto', depot:'Depot', other:'Sonstiges' }[a.type] || a.type}</div>
                 </div>
               </div>
@@ -1104,7 +1305,7 @@ function openAccountItemModal(prefill = null) {
     <div class="modal">
       <div class="modal-title">${prefill ? 'Konto bearbeiten' : 'Konto hinzufügen'}</div>
       <div class="field"><label>Bezeichnung</label>
-        <input id="m-name" type="text" placeholder="z.B. Sparkonto Migros Bank" value="${prefill?.name || ''}">
+        <input id="m-name" type="text" placeholder="z.B. Sparkonto Migros Bank" value="${esc(prefill?.name)}">
       </div>
       <div class="field"><label>Kontotyp</label>
         <select id="m-type">
@@ -1136,14 +1337,14 @@ function saveAccount() {
     state.accounts.push({ id: uid(), name, type, balance });
   }
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.uebersicht(); RENDERERS.vermoegen?.();
+  refreshCurrent();
 }
 
 // ── Überweisung ────────────────────────────────────────────────────────────
 function openTransferModal() {
   if (state.accounts.length < 2) { toast('Mindestens 2 Konten für eine Überweisung nötig'); return; }
-  const opts = state.accounts.map(a => `<option value="${a.id}">${a.name} (${fmt(a.balance)})</option>`).join('');
-  const opts2 = state.accounts.map((a, i) => `<option value="${a.id}" ${i === 1 ? 'selected' : ''}>${a.name} (${fmt(a.balance)})</option>`).join('');
+  const opts = state.accounts.map(a => `<option value="${a.id}">${esc(a.name)} (${fmt(a.balance)})</option>`).join('');
+  const opts2 = state.accounts.map((a, i) => `<option value="${a.id}" ${i === 1 ? 'selected' : ''}>${esc(a.name)} (${fmt(a.balance)})</option>`).join('');
   showModal(`
   <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
     <div class="modal">
@@ -1176,7 +1377,7 @@ function executeTransfer() {
   saveState();
   closeModal();
   toast(`${fmt(amount)} von "${from.name}" → "${to.name}" ✓`);
-  RENDERERS.vermoegen(); RENDERERS.uebersicht();
+  refreshCurrent();
 }
 
 // ── Einkommen Modal ────────────────────────────────────────────────────────
@@ -1186,7 +1387,7 @@ function openIncomeModal(prefill = null) {
     <div class="modal">
       <div class="modal-title">${prefill ? 'Einnahme bearbeiten' : 'Einnahme hinzufügen'}</div>
       <div class="field"><label>Bezeichnung</label>
-        <input id="m-name" type="text" placeholder="z.B. Gehalt" value="${prefill?.name || ''}">
+        <input id="m-name" type="text" placeholder="z.B. Gehalt" value="${esc(prefill?.name)}">
       </div>
       <div class="field"><label>Betrag pro Monat (${state.currency})</label>
         <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.amount || ''}">
@@ -1198,7 +1399,7 @@ function openIncomeModal(prefill = null) {
         </select>
       </div>
       <div class="field"><label>Notiz (optional)</label>
-        <input id="m-note" type="text" value="${prefill?.note || ''}">
+        <input id="m-note" type="text" value="${esc(prefill?.note)}">
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1215,7 +1416,7 @@ function saveIncome() {
   if (editContext) { Object.assign(state.income.find(x => x.id === editContext.id), { name, amount, category, note }); }
   else { state.income.push({ id: uid(), name, amount, category, note }); }
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.einkommen(); RENDERERS.uebersicht();
+  refreshCurrent();
 }
 
 // ── Ausgaben Modal ─────────────────────────────────────────────────────────
@@ -1228,7 +1429,7 @@ function openExpenseModal(prefill = null) {
     <div class="modal">
       <div class="modal-title">${prefill ? 'Ausgabe bearbeiten' : 'Ausgabe hinzufügen'}</div>
       <div class="field"><label>Bezeichnung</label>
-        <input id="m-name" type="text" placeholder="z.B. Miete" value="${prefill?.name || ''}">
+        <input id="m-name" type="text" placeholder="z.B. Miete" value="${esc(prefill?.name)}">
       </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
@@ -1249,7 +1450,7 @@ function openExpenseModal(prefill = null) {
         <input id="m-limit" type="number" inputmode="decimal" step="any" placeholder="0 = kein Limit" value="${prefill?.budgetLimit || ''}">
       </div>
       <div class="field"><label>Notiz (optional)</label>
-        <input id="m-note" type="text" value="${prefill?.note || ''}">
+        <input id="m-note" type="text" value="${esc(prefill?.note)}">
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1289,7 +1490,7 @@ function saveExpense() {
     state.expenses.push({ id: uid(), name, amount, category, frequency, budgetLimit, note });
   }
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.ausgaben(); RENDERERS.uebersicht();
+  refreshCurrent();
 }
 
 // ── Einmalige Buchung Modal ────────────────────────────────────────────────
@@ -1338,7 +1539,7 @@ function saveTransaction() {
   if (!state.transactions) state.transactions = [];
   state.transactions.push({ id: uid(), name, type, amount, category, date, note });
   saveState(); closeModal(); toast('Buchung gespeichert ✓');
-  RENDERERS.ausgaben();
+  refreshCurrent();
 }
 
 // ── Investitions-Modal ─────────────────────────────────────────────────────
@@ -1350,7 +1551,7 @@ function openInvestmentModal(prefill = null) {
     <div class="modal">
       <div class="modal-title">${prefill ? 'Investition bearbeiten' : 'Investition hinzufügen'}</div>
       <div class="field"><label>Bezeichnung</label>
-        <input id="m-name" type="text" placeholder="z.B. MSCI World ETF" value="${prefill?.name || ''}">
+        <input id="m-name" type="text" placeholder="z.B. MSCI World ETF" value="${esc(prefill?.name)}">
       </div>
       <div class="field"><label>Monatlicher Betrag (${state.currency})</label>
         <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.amount || ''}">
@@ -1378,7 +1579,7 @@ function saveInvestment() {
   if (editContext) { Object.assign(state.investments.find(x => x.id === editContext.id), { name, amount, category, returnRate }); }
   else { state.investments.push({ id: uid(), name, amount, category, returnRate }); }
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.vermoegen(); RENDERERS.uebersicht();
+  refreshCurrent();
 }
 
 // ── Depotwert Modal ────────────────────────────────────────────────────────
@@ -1403,8 +1604,7 @@ function openPortfolioModal() {
 function savePortfolioValue() {
   state.portfolioValue = parseFloat(el('m-portfolio')?.value) || 0;
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.vermoegen(); RENDERERS.uebersicht();
-  if (el('page-ziele').classList.contains('active')) RENDERERS.ziele();
+  refreshCurrent();
 }
 
 // ── Schulden-Modal ─────────────────────────────────────────────────────────
@@ -1416,7 +1616,7 @@ function openDebtModal(prefill = null) {
     <div class="modal">
       <div class="modal-title">${prefill ? 'Schuld bearbeiten' : 'Schuld hinzufügen'}</div>
       <div class="field"><label>Bezeichnung</label>
-        <input id="m-name" type="text" placeholder="z.B. Autokredit" value="${prefill?.name || ''}">
+        <input id="m-name" type="text" placeholder="z.B. Autokredit" value="${esc(prefill?.name)}">
       </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
@@ -1457,7 +1657,7 @@ function saveDebt() {
     state.debts.push({ id: uid(), name, category, remainingAmount, originalAmount, monthlyPayment, interestRate });
   }
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.vermoegen(); RENDERERS.uebersicht();
+  refreshCurrent();
 }
 
 // ── Tilgungsstrategie Modal ────────────────────────────────────────────────
@@ -1499,7 +1699,7 @@ function openDebtStrategyModal() {
       ${[...state.debts].sort((a, b) => b.interestRate - a.interestRate).map((d, i) => `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:13px">
           <div style="width:24px;height:24px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0">${i+1}</div>
-          <span style="flex:1">${d.name}</span>
+          <span style="flex:1">${esc(d.name)}</span>
           <span style="color:var(--red);font-weight:600">${d.interestRate}% Zins</span>
           <span style="color:var(--text2);font-size:11px">${fmt(d.remainingAmount)}</span>
         </div>`).join('')}
@@ -1563,7 +1763,7 @@ function applyTaxEstimate() {
   state.settings.taxEstimate = _lastTax;
   state.settings.taxCanton   = _lastTax.canton;
   saveState(); closeModal(); toast('Steuer-Schätzung gespeichert ✓');
-  RENDERERS.einkommen();
+  refreshCurrent();
 }
 
 // ── Sparziel-Modal ─────────────────────────────────────────────────────────
@@ -1584,7 +1784,7 @@ function openGoalModal(prefill = null) {
         <input type="hidden" id="m-icon" value="${sel}">
       </div>
       <div class="field"><label>Bezeichnung</label>
-        <input id="m-name" type="text" placeholder="z.B. Traumurlaub" value="${prefill?.name || ''}">
+        <input id="m-name" type="text" placeholder="z.B. Traumurlaub" value="${esc(prefill?.name)}">
       </div>
       <div class="field"><label>Zielbetrag (${state.currency})</label>
         <input id="m-target" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.targetAmount || ''}">
@@ -1613,7 +1813,7 @@ function saveGoal() {
   if (editContext) { Object.assign(state.goals.find(x => x.id === editContext.id), { name, targetAmount, currentAmount, icon }); }
   else { state.goals.push({ id: uid(), name, targetAmount, currentAmount, icon }); }
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.ziele();
+  refreshCurrent();
 }
 
 // ── FIRE-Einstellungen ─────────────────────────────────────────────────────
@@ -1647,7 +1847,7 @@ function saveFIRESettings() {
   state.settings.fireWithdrawalRate  = parseFloat(el('m-fire-rate')?.value) || 4;
   state.settings.inflationRate       = parseFloat(el('m-inflation')?.value) || 2;
   saveState(); closeModal(); toast('Gespeichert ✓');
-  RENDERERS.ziele(); RENDERERS.uebersicht();
+  refreshCurrent();
 }
 
 // ── Einstellungen ──────────────────────────────────────────────────────────
@@ -1708,8 +1908,23 @@ function resetData() {
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-  navigate('uebersicht');
+function boot() {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (window.Chart) {
+    Chart.defaults.animation.duration = isTouch ? 250 : 400;
+    Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+  }
+  const start = PAGES.includes(pageFromHash()) ? pageFromHash() : 'uebersicht';
+  history.replaceState({ page: start }, '', '#' + start);
+  navigate(start, { push: false });
+
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
-});
+  window.addEventListener('popstate', () => {
+    if (ignoreNextPop) { ignoreNextPop = false; return; }
+    if (el('modal-backdrop')) { removeModal(); return; }
+    navigate(pageFromHash() || 'uebersicht', { push: false });
+  });
+}
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+else boot();

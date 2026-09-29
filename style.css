@@ -28,8 +28,11 @@ html, body {
   font-size: 16px;
   line-height: 1.5;
   min-height: 100dvh;
-  overscroll-behavior: none;
+  overscroll-behavior-y: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
+body.modal-open { overflow: hidden; }
 
 /* ── Layout ── */
 #app { max-width: 480px; margin: 0 auto; min-height: 100dvh; position: relative; }
@@ -179,7 +182,7 @@ nav {
   cursor: pointer; text-align: center; padding: 26px 16px 20px;
 }
 .nw-label { font-size: 12px; color: rgba(255,255,255,.6); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 6px; }
-.nw-amount { font-size: 38px; font-weight: 800; color: #fff; letter-spacing: -1.5px; }
+.nw-amount { font-size: clamp(28px, 9vw, 38px); font-weight: 800; color: #fff; letter-spacing: -1.5px; }
 .nw-breakdown { font-size: 13px; color: rgba(255,255,255,.5); margin-top: 6px; }
 .nw-hint { font-size: 11px; color: rgba(255,255,255,.28); margin-top: 8px; }
 
@@ -243,7 +246,8 @@ nav {
   display: inline-block; padding: 3px 10px; border-radius: 99px;
   font-size: 12px; font-weight: 500; cursor: pointer;
   background: var(--surface2); border: 1px solid var(--border);
-  color: var(--text2); transition: all .15s;
+  color: var(--text2); transition: background-color .15s, color .15s, border-color .15s;
+  user-select: none; -webkit-user-select: none;
 }
 .toggle-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
 
@@ -267,6 +271,7 @@ nav {
 }
 .list-item.item-over { border-color: rgba(239,68,68,.35); }
 .item-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+.item-left > div:last-child { min-width: 0; }
 .item-icon {
   width: 36px; height: 36px; border-radius: 9px;
   display: flex; align-items: center; justify-content: center;
@@ -327,6 +332,7 @@ nav {
   width: 100%; max-width: 480px; margin: 0 auto;
   padding: 20px 18px calc(var(--safe-bottom) + 24px);
   max-height: 92dvh; overflow-y: auto;
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
 .modal-title { font-size: 18px; font-weight: 700; margin-bottom: 16px; }
 .modal-actions { display: flex; gap: 8px; margin-top: 16px; }
@@ -337,8 +343,8 @@ nav {
 .field label { display: block; font-size: 13px; color: var(--text2); margin-bottom: 5px; font-weight: 500; }
 .field input, .field select {
   width: 100%; background: var(--surface2); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); color: var(--text); font-size: 15px;
-  padding: 11px 12px; outline: none; -webkit-appearance: none; font-family: inherit;
+  border-radius: var(--radius-sm); color: var(--text); font-size: 16px;
+  padding: 11px 12px; min-height: 44px; outline: none; -webkit-appearance: none; font-family: inherit;
 }
 .field input:focus, .field select:focus { border-color: var(--primary); }
 .field select option { background: var(--surface2); }
@@ -356,7 +362,7 @@ nav {
   background: var(--surface2); border: 1px solid var(--border);
   border-radius: 99px; padding: 9px 20px;
   font-size: 14px; font-weight: 500; z-index: 300;
-  white-space: nowrap; pointer-events: none;
+  width: max-content; max-width: calc(100vw - 32px); text-align: center; pointer-events: none;
   animation: toastIn .2s ease;
 }
 @keyframes toastIn {
@@ -389,7 +395,7 @@ nav {
 .nw-sum-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .nw-sum-item { flex: 1; text-align: center; }
 .nw-sum-label { font-size: 11px; color: rgba(255,255,255,.55); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
-.nw-sum-val { font-size: 18px; font-weight: 700; }
+.nw-sum-val { font-size: clamp(14px, 4.4vw, 18px); font-weight: 700; }
 .nw-sum-val.green { color: var(--green); }
 .nw-sum-val.red   { color: #f87171; }
 .nw-sum-op { font-size: 18px; font-weight: 700; color: rgba(255,255,255,.3); flex-shrink: 0; padding: 0 2px; }
@@ -462,7 +468,7 @@ nav {
 .insight-row {
   display: flex; align-items: center; gap: 8px;
   background: var(--surface2); border-radius: 8px; padding: 8px 10px;
-  font-size: 13px;
+  font-size: 13px; flex-wrap: wrap;
 }
 .insight-bonus  { font-weight: 700; color: var(--green); min-width: 90px; }
 .insight-arrow  { color: var(--text2); }
@@ -488,3 +494,29 @@ nav {
 
 /* ── Transfer Btn Highlight ── */
 .add-btn.transfer-btn { color: var(--primary-light); border-color: rgba(99,102,241,.4); }
+
+/* ── Touch-Geräte: grössere Tippflächen (min. ~40px) ── */
+@media (pointer: coarse) {
+  .btn-icon { width: 40px; height: 40px; font-size: 16px; }
+  .toggle-btn { padding: 7px 12px; font-size: 13px; }
+  .nav-btn { min-height: 52px; }
+  .item-actions { gap: 6px; }
+  .icon-pick { font-size: 22px; padding: 7px 9px; }
+}
+
+/* ── Sehr schmale Handys (z.B. iPhone SE, 320–375px) ── */
+@media (max-width: 380px) {
+  .page { padding-left: 12px; padding-right: 12px; }
+  .card { padding: 14px 12px; }
+  .stat-card .val { font-size: 17px; }
+  .item-icon { width: 32px; height: 32px; font-size: 15px; }
+  .list-item { padding: 10px; gap: 8px; }
+  .item-amount { font-size: 13px; }
+  .kpi-value { font-size: 15px; }
+  .nav-btn { font-size: 9px; }
+}
+
+/* ── Weniger Animationen, wenn im System gewünscht ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
