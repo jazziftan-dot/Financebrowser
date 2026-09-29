@@ -1,6 +1,6 @@
-const CACHE_NAME = 'finanzplaner-v6';
+const CACHE_NAME = 'finanzplaner-v7';
 // Relative Pfade: funktioniert auch unter einem Unterordner (z.B. GitHub Pages /Financebrowser/)
-const ASSETS = ['./', 'index.html', 'style.css', 'app.js', 'liquidity.js', 'contracts.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
+const ASSETS = ['./', 'index.html', 'style.css', 'app.js', 'liquidity.js', 'contracts.js', 'decisions.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com'];
 
 self.addEventListener('install', e => {

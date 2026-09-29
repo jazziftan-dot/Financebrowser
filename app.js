@@ -15,16 +15,21 @@ const DEFAULT_STATE = {
   portfolioHistory: [],
   cardPayments: [],
   contracts: [],
+  wishlist: [],
+  tagBudgets: {},
   settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0, taxEstimate: null, taxCanton: 'ZH',
               privacy: false, pinHash: null, pinLength: null, lastBackup: 0, backupSnooze: 0,
               // v2: Budgetmonat & Lohn
               monthMode: 'calendar', payday: 25, paydayWeekendShift: true, transfersDoneFor: null,
               payroll: { ahv: 5.3, alv: 1.1, alvCap: 148200, nbu: 1.0, bvgMonthly: 0 },
-              grossCalc: { a: 0, b: 0, n: 12, compare: false } }
+              grossCalc: { a: 0, b: 0, n: 12, compare: false },
+              // v4: Entscheidungshilfen
+              workPriceEnabled: true, workHoursPerWeek: 42, workPriceThreshold: 50,
+              wishWaitDays: 30, likRate: null }
 };
 
 // Aktuelle Version des Datenmodells. Jede Erhöhung braucht einen Schritt in MIGRATIONS.
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 // ── Kontotypen ─────────────────────────────────────────────────────────────
 const ACCOUNT_TYPES = {
@@ -100,7 +105,9 @@ const MIGRATIONS = {
   },
   // v3: Verträge (Kündigungsfristen); Belegfotos liegen in IndexedDB, Buchungen erhalten optional
   //     warrantyUntil + receiptIds
-  3: st => { st.contracts = st.contracts || []; }
+  3: st => { st.contracts = st.contracts || []; },
+  // v4: Wunschliste, Projekt-Budgets pro Tag; Buchungen/Ausgaben erhalten optional tags[]
+  4: st => { st.wishlist = st.wishlist || []; st.tagBudgets = st.tagBudgets || {}; }
 };
 
 function migrateState(raw) {
@@ -717,6 +724,7 @@ RENDERERS.ausgaben = function() {
             <div class="item-icon" style="background:${colorFor(e.category)}22">${iconFor(e.category)}</div>
             <div style="min-width:0">
               <div class="item-name">${esc(e.name)} ${freqLabel}</div>
+              ${e.tags?.length && typeof tagChips === 'function' ? tagChips(e.tags) : ''}
               <div class="item-sub">${e.category}${dueInfo} · ${pct}% Einkomm.${hasLim ? ' · Limit ' + fmt(e.budgetLimit) : ''}</div>
               ${hasLim ? `<div class="budget-bar"><div class="budget-fill ${bCls}" style="width:${bpct}%"></div></div>` : ''}
             </div>
@@ -957,7 +965,9 @@ function renderTransactions() {
   const query = (el('tx-search')?.value || '').trim().toLowerCase();
   const typeFilter = el('tx-type-filter')?.value || 'all';
   let shown = query
-    ? (state.transactions || []).filter(t => `${t.name} ${t.category} ${t.note || ''}`.toLowerCase().includes(query))
+    ? (state.transactions || []).filter(t => query.startsWith('#')
+        ? (t.tags || []).some(tag => tag.toLowerCase() === query.slice(1))
+        : `${t.name} ${t.category} ${t.note || ''} ${(t.tags || []).map(x => '#' + x).join(' ')}`.toLowerCase().includes(query))
     : txs;
   if (typeFilter !== 'all') shown = shown.filter(t => (t.type === 'income') === (typeFilter === 'income'));
 
@@ -980,6 +990,7 @@ function renderTransactions() {
         <div>
           <div class="item-name">${esc(t.name)}${t.fromReserve ? ' <span class="freq-badge">🐷 aus Rückstellung</span>' : ''}${t.receiptIds?.length ? ` <span class="receipt-link" onclick="showReceipts('${t.id}')">🧾</span>` : ''}</div>
           <div class="item-sub">${esc(t.category || '–')} · ${fmtDate(t.date)}${acc ? ' · ' + esc(acc) : ''}</div>
+          ${t.tags?.length && typeof tagChips === 'function' ? tagChips(t.tags) : ''}
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
@@ -2534,7 +2545,7 @@ function openTransactionModal(prefill = null) {
   showModal(`
   <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
     <div class="modal">
-      <div class="modal-title">${prefill ? '✏️ Buchung bearbeiten' : '📝 Buchung erfassen'}</div>
+      <div class="modal-title">${prefill?.id ? '✏️ Buchung bearbeiten' : '📝 Buchung erfassen'}</div>
       <div class="field"><label>Typ</label>
         <select id="m-tx-type" onchange="updateTxCategories()">
           <option value="expense" ${type === 'expense' ? 'selected' : ''}>💸 Ausgabe</option>

@@ -593,6 +593,23 @@ nav {
 .rv-bar button { background: rgba(255,255,255,.12); border: none; color: #fff; border-radius: 99px; width: 40px; height: 40px; font-size: 16px; cursor: pointer; }
 .list-item.muted { opacity: .55; }
 
+/* ── Arbeitsstunden-Preis ── */
+.workprice { font-size: 13px; font-weight: 600; color: var(--orange); margin: -6px 0 12px; }
+.workprice:empty { display: none; }
+
+/* ── Tags ── */
+.tag-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.tag-chip { display: inline-block; font-size: 11px; font-weight: 600; color: var(--primary-light); background: rgba(99,102,241,.14);
+  border: 1px solid rgba(99,102,241,.28); border-radius: 99px; padding: 1px 8px; cursor: pointer; font-family: inherit; }
+.tag-suggest { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.tag-suggest .tag-chip { font-size: 13px; padding: 5px 11px; }
+
+/* ── Wunschliste ── */
+.wish-saved { display: flex; justify-content: space-between; align-items: center; background: rgba(16,185,129,.07); border-color: rgba(16,185,129,.3); }
+.wish-actions { display: flex; gap: 6px; margin-top: 10px; }
+.wish-actions .btn { flex: 1; padding: 9px 6px; font-size: 13px; }
+.wish-link { color: var(--text); text-decoration: none; }
+
 /* ── Rückstellungen ── */
 .stat-card .sub { font-size: 10px; color: var(--text2); margin-top: 2px; line-height: 1.3; }
 .check-row {
