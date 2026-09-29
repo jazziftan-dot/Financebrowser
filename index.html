@@ -42,7 +42,7 @@
 
     <div class="stat-row">
       <div class="stat-card"><div class="lbl">Einkommen/Mt.</div><div class="val green" id="dash-income">0</div></div>
-      <div class="stat-card"><div class="lbl">Ausgaben/Mt.</div><div class="val red" id="dash-expenses">0</div></div>
+      <div class="stat-card"><div class="lbl">Ausgaben/Mt.</div><div class="val red" id="dash-expenses">0</div><div class="sub" id="dash-expenses-sub"></div></div>
     </div>
     <div class="stat-row">
       <div class="stat-card"><div class="lbl">Investiert/Mt.</div><div class="val blue" id="dash-investments">0</div></div>
@@ -60,7 +60,7 @@
 
     <!-- Anstehende Zahlungen -->
     <div class="card">
-      <div class="card-title">📅 Anstehende Zahlungen (14 Tage)</div>
+      <div class="card-title">📅 Anstehende Zahlungen</div>
       <div id="dash-upcoming"></div>
     </div>
 
@@ -199,6 +199,16 @@
     <div style="margin-top:10px">
       <button class="add-btn" onclick="openExpenseModal()">+ Ausgabe hinzufügen</button>
     </div>
+
+    <!-- Rückstellungen (Sparkässeli pro Ausgabe) -->
+    <div id="reserve-section"></div>
+
+    <!-- Cashflow-Vorschau -->
+    <div class="section-divider" style="margin-top:20px">
+      <div class="sdiv-title">📆 Cashflow-Vorschau (12 Monate)</div>
+      <div class="sdiv-line"></div>
+    </div>
+    <div class="card" id="cashflow-card"></div>
 
     <!-- Buchungen pro Monat -->
     <div class="section-divider" style="margin-top:20px">

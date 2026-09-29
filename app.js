@@ -17,6 +17,55 @@ const DEFAULT_STATE = {
               privacy: false, pinHash: null, pinLength: null, lastBackup: 0, backupSnooze: 0 }
 };
 
+// ── Rhythmus & Datums-Helfer ───────────────────────────────────────────────
+// Bewusst vor migrateState/state definiert: werden schon beim Laden der Daten gebraucht.
+const CYCLE_MONTHS = { monthly: 1, quarterly: 3, semiannual: 6, yearly: 12 };
+const CYCLE_LABEL  = { monthly: 'Monatlich', quarterly: 'Vierteljährlich', semiannual: 'Halbjährlich', yearly: 'Jährlich' };
+const CYCLE_UNIT   = { monthly: 'Monat', quarterly: 'Quartal', semiannual: 'Halbjahr', yearly: 'Jahr' };
+
+function isoDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function parseISO(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+// Datum um n Monate verschieben; Tag wird auf Monatsende begrenzt (31. → 28./30.)
+function addMonthsISO(iso, n, day) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const t = new Date(y, m - 1 + n, 1);
+  const dim = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
+  t.setDate(Math.min(day || d, dim));
+  return isoDate(t);
+}
+// Anzahl Kalendermonate von heute bis zum Datum (gleicher Monat = 0, überfällig < 0)
+function monthsUntil(iso) {
+  const now = new Date(), d = parseISO(iso);
+  return (d.getFullYear() - now.getFullYear()) * 12 + d.getMonth() - now.getMonth();
+}
+function daysUntil(iso) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return Math.round((parseISO(iso) - today) / 864e5);
+}
+
+// Alte Ausgaben ohne Rhythmus gelten als monatlich. Jährliche Ausgaben mit Tag+Monat
+// erhalten ein konkretes Fälligkeitsdatum. Beträge und Rückstellung bleiben unverändert
+// (Rückstellung ist für bestehende Einträge aus, bis man sie aktiviert).
+function migrateExpense(e) {
+  const out = { ...e };
+  if (!CYCLE_MONTHS[out.frequency]) out.frequency = 'monthly';
+  if (out.frequency === 'yearly' && !out.nextDue && out.dueDay && out.dueMonth) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const at = y => new Date(y, out.dueMonth - 1, Math.min(out.dueDay, new Date(y, out.dueMonth, 0).getDate()));
+    let d = at(today.getFullYear());
+    if (d < today) d = at(today.getFullYear() + 1);
+    out.nextDue = isoDate(d);
+  }
+  if (typeof out.reserve !== 'boolean') out.reserve = false;
+  if (typeof out.reserveSaved !== 'number') out.reserveSaved = 0;
+  return out;
+}
+
 function migrateState(raw) {
   if (!raw) return JSON.parse(JSON.stringify(DEFAULT_STATE));
   if (typeof raw.balance === 'number' && !raw.accounts) {
@@ -25,18 +74,27 @@ function migrateState(raw) {
       : [];
     delete raw.balance;
   }
-  return {
+  const st = {
     ...JSON.parse(JSON.stringify(DEFAULT_STATE)),
     ...raw,
     settings: { ...DEFAULT_STATE.settings, ...(raw.settings || {}) }
   };
+  st.expenses = (st.expenses || []).map(migrateExpense);
+  return st;
 }
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 let state = (() => {
-  try { return migrateState(JSON.parse(localStorage.getItem('finanzplaner'))); }
-  catch { return migrateState(null); }
+  let raw = null;
+  try { raw = localStorage.getItem('finanzplaner'); } catch {}
+  try { return migrateState(JSON.parse(raw)); }
+  catch (err) {
+    // Nie stillschweigend Daten verlieren: Rohdaten sichern, bevor leer gestartet wird
+    console.error('Laden fehlgeschlagen', err);
+    try { if (raw) localStorage.setItem('finanzplaner-rescue-' + Date.now(), raw); } catch {}
+    return migrateState(null);
+  }
 })();
 
 let projectionChart = null;
@@ -70,7 +128,10 @@ function fmtK(n) {
 // ── Berechnungen ───────────────────────────────────────────────────────────
 const totalAccounts    = () => state.accounts.reduce((s, a) => s + a.balance, 0);
 const totalIncome      = () => state.income.reduce((s, i) => s + i.amount, 0);
-const monthlyAmt       = e => e.frequency === 'yearly' ? e.amount / 12 : e.amount;
+const cycleOf          = e => CYCLE_MONTHS[e.frequency] || 1;
+const isIrregular      = e => cycleOf(e) > 1;
+// Monatsdurchschnitt – Basis für 50/30/20, Sparquote, FIRE und Sparziele
+const monthlyAmt       = e => e.amount / cycleOf(e);
 const totalExpenses    = () => state.expenses.reduce((s, e) => s + monthlyAmt(e), 0);
 const totalInvestments = () => state.investments.reduce((s, i) => s + i.amount, 0);
 const totalDebtPay     = () => state.debts.reduce((s, d) => s + d.monthlyPayment, 0);
@@ -78,6 +139,44 @@ const totalDebt        = () => state.debts.reduce((s, d) => s + d.remainingAmoun
 const totalAssets      = () => totalAccounts() + state.portfolioValue;
 const netWorth         = () => totalAssets() - totalDebt();
 const monthlySavings   = () => totalIncome() - totalExpenses() - totalInvestments() - totalDebtPay();
+
+// ── Rückstellungen ("Sparkässeli" pro Ausgabe) ────────────────────────────
+const hasReserve = e => e.reserve && isIrregular(e) && !!e.nextDue;
+const reserveExpenses = () => state.expenses.filter(hasReserve);
+
+// Soll-Stand, Monatsrate (inkl. Nachholbedarf) und Status eines Topfs
+function reserveInfo(e) {
+  const cycle  = cycleOf(e);
+  const normal = e.amount / cycle;
+  const saved  = e.reserveSaved || 0;
+  const need   = Math.max(0, e.amount - saved);
+  const until  = monthsUntil(e.nextDue);            // 0 = diesen Monat fällig
+  const monthsLeft = Math.max(1, until);            // noch mögliche Einzahlungen
+  // Soll heute: so viel, wie bei gleichmässigem Sparen seit der letzten Fälligkeit im Topf sein müsste
+  const soll = Math.max(0, Math.min(e.amount, e.amount * (1 - Math.min(cycle, monthsLeft) / cycle)));
+  const behind = saved < soll - 0.005;
+  // Normalfall: Betrag/Zyklus · Nachholfall: Restbetrag verteilt auf die verbleibenden Monate
+  const computed = need <= 0 ? 0 : behind ? need / monthsLeft : Math.min(normal, need);
+  // Wurde die Einzahlung diesen Monat schon verbucht, bleibt die Monatsrate bis Monatsende fix
+  const booked = e.reserveBookedMonth === monthKey();
+  const rate = booked ? (e.reserveBookedAmount || 0) : computed;
+  const ratio = soll > 0 ? saved / soll : 1;
+  const status = ratio >= 0.95 ? 'green' : ratio >= 0.7 ? 'yellow' : 'red';
+  const days = daysUntil(e.nextDue);
+  // Warnung, wenn der Topf mit den regulären Einzahlungen bis zur Fälligkeit nicht voll wird
+  // (vorsichtig gerechnet: die Einzahlung im Fälligkeitsmonat kommt evtl. zu spät)
+  const depositsLeft = days < 0 ? 0 : (booked ? 0 : 1) + Math.max(0, until - 1);
+  const projected = saved + Math.min(normal, need) * depositsLeft;   // mit der regulären Rate
+  const shortfall = days <= 30 ? Math.max(0, e.amount - projected) : 0;
+  return { cycle, normal, saved, need, until, monthsLeft, soll, rate, behind, status, days, booked,
+           catchUp: behind && computed > normal + 0.005, shortfall: shortfall > 0.005 ? shortfall : 0 };
+}
+
+const totalReserveRate = () => reserveExpenses().reduce((s, e) => s + reserveInfo(e).rate, 0);
+const totalReserved    = () => reserveExpenses().reduce((s, e) => s + (e.reserveSaved || 0), 0);
+// Tatsächlicher Monatsbedarf: Töpfe mit ihrer (ggf. erhöhten) Rate, der Rest als Durchschnitt
+const cashflowExpenses = () => state.expenses.reduce((s, e) => s + (hasReserve(e) ? reserveInfo(e).rate : monthlyAmt(e)), 0);
+const cashflowFree     = () => totalIncome() - cashflowExpenses() - totalInvestments() - totalDebtPay();
 const weightedReturn   = () => {
   const total = totalInvestments();
   if (!total) return 6;
@@ -283,12 +382,17 @@ RENDERERS.uebersicht = function() {
   const rate    = income > 0 ? Math.max(0, Math.min(100, (savings + invest) / income * 100)) : 0;
 
   el('dash-networth').textContent = fmt(nw);
-  el('dash-nw-breakdown').textContent = `Vermögen: ${fmtK(totalAssets())} · Schulden: ${fmtK(totalDebt())}`;
+  const reserved = totalReserved();
+  el('dash-nw-breakdown').textContent = `Vermögen: ${fmtK(totalAssets())} · Schulden: ${fmtK(totalDebt())}`
+    + (reserved > 0 ? ` · davon reserviert: ${fmtK(reserved)}` : '');
+  // Ausgaben/Frei pro Monat mit tatsächlicher Rückstellungsrate (inkl. Nachholbedarf)
+  const cashExp = cashflowExpenses(), reserveRate = totalReserveRate(), free = cashflowFree();
   el('dash-income').textContent       = fmt(income);
-  el('dash-expenses').textContent     = fmt(exp + debtP);
+  el('dash-expenses').textContent     = fmt(cashExp + debtP);
+  el('dash-expenses-sub').textContent = reserveRate > 0 ? `davon Rückstellungen: ${fmt(reserveRate)}` : '';
   el('dash-investments').textContent  = fmt(invest);
-  el('dash-savings').textContent      = fmt(savings);
-  el('dash-savings').className = 'val ' + (savings >= 0 ? 'green' : 'red');
+  el('dash-savings').textContent      = fmt(free);
+  el('dash-savings').className = 'val ' + (free >= 0 ? 'green' : 'red');
 
   renderDashMonth();
   renderBackupHint();
@@ -526,8 +630,11 @@ function renderTaxDisplay() {
 RENDERERS.ausgaben = function() {
   el('ausgaben-total').textContent = fmt(totalExpenses());
   const dp = totalDebtPay();
-  el('ausgaben-debt-row').innerHTML = dp > 0
-    ? `<div class="info-row">🏦 Schuldentilgung <span>${fmt(dp)}/Mt.</span></div>` : '';
+  const rr = totalReserveRate();
+  el('ausgaben-debt-row').innerHTML = (dp > 0
+    ? `<div class="info-row">🏦 Schuldentilgung <span>${fmt(dp)}/Mt.</span></div>` : '')
+    + (reserveExpenses().length
+    ? `<div class="info-row">🐷 Rückstellungen diesen Monat <span>${fmtExact(round2(rr))}</span></div>` : '');
 
   render503020('ausgaben-budget-rule');
 
@@ -541,23 +648,25 @@ RENDERERS.ausgaben = function() {
         const over = hasLim && m > e.budgetLimit;
         const bpct = hasLim ? Math.min(100, m / e.budgetLimit * 100) : 0;
         const bCls = over ? 'budget-over' : bpct > 80 ? 'budget-warn' : 'budget-ok';
-        const freqLabel = e.frequency === 'yearly'
-          ? `<span class="freq-badge">Jährlich</span>`
-          : '';
+        const irregular = isIrregular(e);
+        const freqLabel = irregular ? `<span class="freq-badge">${CYCLE_LABEL[e.frequency]}${hasReserve(e) ? ' 🐷' : ''}</span>` : '';
+        const dueInfo = irregular
+          ? (e.nextDue ? ` · fällig ${parseISO(e.nextDue).toLocaleDateString('de-CH')}` : ' · Fälligkeit fehlt')
+          : (e.dueDay ? ` · am ${e.dueDay}.` : '');
         return `
         <div class="list-item${over ? ' item-over' : ''}">
           <div class="item-left">
             <div class="item-icon" style="background:${colorFor(e.category)}22">${iconFor(e.category)}</div>
             <div style="min-width:0">
               <div class="item-name">${esc(e.name)} ${freqLabel}</div>
-              <div class="item-sub">${e.category}${e.dueDay ? ` · am ${e.dueDay}.` : ''} · ${pct}% Einkomm.${hasLim ? ' · Limit ' + fmt(e.budgetLimit) : ''}</div>
+              <div class="item-sub">${e.category}${dueInfo} · ${pct}% Einkomm.${hasLim ? ' · Limit ' + fmt(e.budgetLimit) : ''}</div>
               ${hasLim ? `<div class="budget-bar"><div class="budget-fill ${bCls}" style="width:${bpct}%"></div></div>` : ''}
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
             <div style="text-align:right">
               <div class="item-amount" style="color:var(--red)">${fmt(m)}</div>
-              ${e.frequency === 'yearly' ? `<div style="font-size:10px;color:var(--text2)">${fmt(e.amount)}/Jahr</div>` : ''}
+              ${irregular ? `<div style="font-size:10px;color:var(--text2)">${fmt(e.amount)}/${CYCLE_UNIT[e.frequency]}</div>` : ''}
             </div>
             <div class="item-actions">
               <button class="btn btn-ghost btn-icon" onclick="openEdit('expense','${e.id}')">✏️</button>
@@ -568,6 +677,8 @@ RENDERERS.ausgaben = function() {
       }).join('')
     : emptyState('💸', 'Noch keine Ausgaben erfasst.');
 
+  renderReserveSection();
+  renderCashflowPreview();
   renderTransactions();
   renderReport();
 };
@@ -584,7 +695,10 @@ function monthTotals(key) {
   const txs = txOfMonth(key);
   const income  = txs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
   const expense = txs.filter(t => t.type !== 'income').reduce((s, t) => s + t.amount, 0);
-  return { txs, income, expense, saldo: income - expense };
+  // Aus Rückstellung bezahlt bzw. geplante Fixkosten-Zahlung (über "Bezahlt" erfasst)
+  const reserveExpense = txs.filter(t => t.fromReserve && t.type !== 'income').reduce((s, t) => s + t.amount, 0);
+  const plannedExpense = txs.filter(t => t.expenseId && t.type !== 'income').reduce((s, t) => s + t.amount, 0);
+  return { txs, income, expense, saldo: income - expense, reserveExpense, plannedExpense };
 }
 
 // Budget-Limit pro Kategorie = Summe der Limits aller regelmässigen Ausgaben dieser Kategorie
@@ -599,41 +713,45 @@ function readDueDay(id) {
   return d >= 1 && d <= 31 ? d : null;
 }
 
-// Nächste Fälligkeiten von Einkommen und Fixkosten mit Fälligkeitstag
-function upcomingPayments(days = 14) {
+// Nächste Fälligkeiten: monatliche Posten per Fälligkeitstag (14 Tage),
+// Quartals-/Halbjahres-/Jahreszahlungen per Datum (30 Tage Vorlauf, inkl. überfällige)
+function upcomingPayments(days = 14, irregularDays = 30) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const end = new Date(today); end.setDate(end.getDate() + days);
   const at = (y, m, day) => new Date(y, m, Math.min(day, new Date(y, m + 1, 0).getDate()));
-  const nextDate = (item) => {
-    const y = today.getFullYear(), m = today.getMonth();
-    const cands = item.frequency === 'yearly'
-      ? [at(y, (item.dueMonth || 1) - 1, item.dueDay), at(y + 1, (item.dueMonth || 1) - 1, item.dueDay)]
-      : [at(y, m, item.dueDay), at(y, m + 1, item.dueDay)];
-    return cands.find(d => d >= today);
-  };
   const out = [];
-  const add = (item, type) => {
+  const addMonthly = (item, type) => {
     if (!item.dueDay) return;
-    const date = nextDate(item);
+    const y = today.getFullYear(), m = today.getMonth();
+    const date = [at(y, m, item.dueDay), at(y, m + 1, item.dueDay)].find(d => d >= today);
     if (date && date <= end) out.push({ name: item.name, amount: item.amount, category: item.category, type, date,
       days: Math.round((date - today) / 864e5) });
   };
-  state.income.forEach(i => add(i, 'income'));
-  state.expenses.forEach(e => add(e, 'expense'));
+  state.income.forEach(i => addMonthly(i, 'income'));
+  state.expenses.forEach(e => {
+    if (!isIrregular(e)) { addMonthly(e, 'expense'); return; }
+    if (!e.nextDue) return;
+    const d = daysUntil(e.nextDue);
+    if (d > irregularDays) return;
+    out.push({ name: e.name, amount: e.amount, category: e.category, type: 'expense', date: parseISO(e.nextDue),
+      days: d, expenseId: e.id, irregular: true, shortfall: hasReserve(e) ? reserveInfo(e).shortfall : 0, reserve: hasReserve(e) });
+  });
   return out.sort((a, b) => a.date - b.date);
 }
 
 function renderDashMonth() {
   const key = monthKey();
-  const { income, expense, saldo, txs } = monthTotals(key);
+  const { income, expense, saldo, txs, plannedExpense } = monthTotals(key);
   el('dash-month-title').textContent = monthLabel(key);
   const now = new Date();
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const elapsed = now.getDate() / daysInMonth * 100;
-  // Frei verfügbar = geplanter Überschuss (nach Fixkosten, Investitionen, Raten) + Saldo der Buchungen
-  const free = monthlySavings() + saldo;
-  const base = Math.max(1, monthlySavings() + income);
-  const usedPct = Math.max(0, Math.min(100, expense / base * 100));
+  // Frei verfügbar = Überschuss nach Fixkosten, Rückstellungen, Investitionen und Raten + Saldo der Buchungen.
+  // Über "Bezahlt" erfasste Fixkosten/Jahreszahlungen sind schon eingeplant → nicht doppelt abziehen.
+  const plannedFree = cashflowFree();
+  const free = plannedFree + saldo + plannedExpense;
+  const base = Math.max(1, plannedFree + income);
+  const usedPct = Math.max(0, Math.min(100, (expense - plannedExpense) / base * 100));
   el('dash-month').innerHTML = `
     <div class="kpi-grid kpi-grid-3">
       <div class="kpi-item"><div class="kpi-label">Einnahmen</div><div class="kpi-value green">${fmtK(income)}</div></div>
@@ -648,16 +766,21 @@ function renderDashMonth() {
         <div style="height:100%;width:${usedPct}%;background:${usedPct > elapsed + 10 ? 'var(--orange)' : 'var(--green)'};border-radius:99px"></div>
       </div>
     </div>
-    <div style="font-size:11px;color:var(--text2);margin-top:6px">${txs.length ? `${txs.length} Buchung${txs.length === 1 ? '' : 'en'} diesen Monat` : 'Erfasse Einkäufe & Extras als Buchung, um deinen Monat zu verfolgen.'}</div>`;
+    <div style="font-size:11px;color:var(--text2);margin-top:6px">${txs.length ? `${txs.length} Buchung${txs.length === 1 ? '' : 'en'} diesen Monat` : 'Erfasse Einkäufe & Extras als Buchung, um deinen Monat zu verfolgen.'}${plannedExpense > 0 ? ` · ${fmt(plannedExpense)} geplante Zahlungen (aus Rückstellung/Fixkosten) nicht doppelt gezählt` : ''}</div>`;
 
-  const up = upcomingPayments(14);
-  el('dash-upcoming').innerHTML = up.length ? `<div class="item-list">${up.slice(0, 6).map(p => `
-    <div class="upcoming-row">
-      <span class="upcoming-when">${p.days === 0 ? 'Heute' : p.days === 1 ? 'Morgen' : 'in ' + p.days + ' T.'}</span>
-      <span class="upcoming-name">${iconFor(p.category)} ${esc(p.name)}</span>
+  el('dash-upcoming').innerHTML = renderUpcomingList(upcomingPayments(), 8);
+}
+
+function renderUpcomingList(up, max) {
+  if (!up.length) return '<div style="font-size:13px;color:var(--text2)">Keine Zahlungen in den nächsten Tagen. Tipp: Trage bei Einkommen und Ausgaben einen Fälligkeitstag bzw. die nächste Fälligkeit ein.</div>';
+  return `<div class="item-list">${up.slice(0, max).map(p => `
+    <div class="upcoming-row${p.irregular ? ' upcoming-irregular' : ''}">
+      <span class="upcoming-when" ${p.days < 0 ? 'style="color:var(--red)"' : ''}>${p.days < 0 ? 'Überfällig' : p.days === 0 ? 'Heute' : p.days === 1 ? 'Morgen' : 'in ' + p.days + ' T.'}</span>
+      <span class="upcoming-name">${iconFor(p.category)} ${esc(p.name)}${p.reserve ? ' 🐷' : ''}
+        ${p.shortfall > 0 ? `<br><span class="upcoming-warn">⚠️ Es fehlen ${fmtExact(round2(p.shortfall))}</span>` : ''}</span>
       <span style="font-weight:600;color:${p.type === 'income' ? 'var(--green)' : 'var(--red)'}">${p.type === 'income' ? '+' : '−'}${fmt(p.amount)}</span>
-    </div>`).join('')}</div>`
-    : '<div style="font-size:13px;color:var(--text2)">Keine Zahlungen in den nächsten 14 Tagen. Tipp: Trage bei Einkommen und Ausgaben einen Fälligkeitstag ein.</div>';
+      ${p.irregular ? `<button class="toggle-btn" onclick="openPaidModal('${p.expenseId}')">Bezahlt</button>` : ''}
+    </div>`).join('')}</div>`;
 }
 
 // Einmal pro Monat automatisch den Stand des Nettovermögens festhalten
@@ -746,7 +869,7 @@ function renderTransactions() {
       <div class="item-left">
         <div class="item-icon" style="background:${colorFor(t.category)}22">${iconFor(t.category)}</div>
         <div>
-          <div class="item-name">${esc(t.name)}</div>
+          <div class="item-name">${esc(t.name)}${t.fromReserve ? ' <span class="freq-badge">🐷 aus Rückstellung</span>' : ''}</div>
           <div class="item-sub">${esc(t.category || '–')} · ${new Date(t.date).toLocaleDateString('de-CH')}${acc ? ' · ' + esc(acc) : ''}</div>
         </div>
       </div>
@@ -761,6 +884,268 @@ function renderTransactions() {
       </div>
     </div>`;
   }).join('') + (sorted.length > LIMIT ? `<div style="font-size:12px;color:var(--text2);text-align:center">… ${sorted.length - LIMIT} weitere – Suche verfeinern</div>` : '');
+}
+
+// ── Rückstellungs-Töpfe ────────────────────────────────────────────────────
+const STATUS_LABEL = { green: 'Auf Kurs', yellow: 'Leicht hinten', red: 'Reicht nicht' };
+const STATUS_COLOR = { green: 'var(--green)', yellow: 'var(--yellow)', red: 'var(--red)' };
+
+function renderReserveSection() {
+  const box = el('reserve-section');
+  if (!box) return;
+  const pots = reserveExpenses().sort((a, b) => a.nextDue.localeCompare(b.nextDue));
+  const candidates = state.expenses.filter(e => isIrregular(e) && !hasReserve(e));
+  if (!pots.length && !candidates.length) { box.innerHTML = ''; return; }
+  const doneThisMonth = state.settings.reserveDepositMonth === monthKey();
+  box.innerHTML = `
+    <div class="section-divider" style="margin-top:20px">
+      <div class="sdiv-title">🐷 Rückstellungen</div>
+      <div class="sdiv-line"></div>
+    </div>
+    ${pots.length ? `
+    <div class="card">
+      <div class="kpi-grid" style="margin-bottom:12px">
+        <div class="kpi-item"><div class="kpi-label">Reserviert total</div><div class="kpi-value">${fmtExact(round2(totalReserved()))}</div></div>
+        <div class="kpi-item"><div class="kpi-label">Einzahlung diesen Monat</div><div class="kpi-value" style="color:var(--orange)">${fmtExact(round2(totalReserveRate()))}</div></div>
+      </div>
+      <button class="btn ${doneThisMonth ? 'btn-ghost' : 'btn-primary'}" style="width:100%" onclick="bookMonthlyReserve()">
+        ${doneThisMonth ? `✓ Einzahlung ${monthLabel(monthKey())} verbucht` : '💰 Monatliche Einzahlung verbucht'}
+      </button>
+      <div style="font-size:11px;color:var(--text2);margin-top:8px">Überweise den Betrag z.B. per Dauerauftrag aufs Sparkonto und tippe dann auf den Knopf – alle Töpfe werden um ihre Monatsrate gefüllt.</div>
+    </div>
+    <div class="item-list">${pots.map(renderPot).join('')}</div>` : ''}
+    ${candidates.length ? `
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">Ohne Rückstellung</div>
+      ${candidates.map(e => `
+        <div class="upcoming-row" style="margin-bottom:6px">
+          <span class="upcoming-name">${iconFor(e.category)} ${esc(e.name)}
+            <br><span style="font-size:11px;color:var(--text2)">${fmt(e.amount)} ${CYCLE_LABEL[e.frequency].toLowerCase()}${e.nextDue ? ' · fällig ' + parseISO(e.nextDue).toLocaleDateString('de-CH') : ' · Fälligkeit fehlt'}</span></span>
+          <button class="toggle-btn" onclick="openEdit('expense','${e.id}')">Einrichten</button>
+        </div>`).join('')}
+    </div>` : ''}`;
+}
+
+function renderPot(e) {
+  const i = reserveInfo(e);
+  const pct = e.amount > 0 ? Math.min(100, i.saved / e.amount * 100) : 0;
+  const sollPct = e.amount > 0 ? Math.min(100, i.soll / e.amount * 100) : 0;
+  const acc = e.reserveAccountId && state.accounts.find(a => a.id === e.reserveAccountId);
+  const when = i.days < 0 ? `<span style="color:var(--red)">überfällig seit ${-i.days} T.</span>`
+    : i.days === 0 ? 'heute fällig'
+    : i.days <= 60 ? `in ${i.days} Tagen` : `in ${i.until} Mt.`;
+  return `
+  <div class="pot">
+    <div class="pot-head">
+      <div class="item-icon" style="background:${colorFor(e.category)}22">${iconFor(e.category)}</div>
+      <div style="flex:1;min-width:0">
+        <div class="item-name">${esc(e.name)}</div>
+        <div class="item-sub">${parseISO(e.nextDue).toLocaleDateString('de-CH')} · ${when}${acc ? ' · ' + esc(acc.name) : ''}</div>
+      </div>
+      <span class="status-badge badge-${i.status}">${STATUS_LABEL[i.status]}</span>
+    </div>
+    <div class="pot-bar" title="Strich = Soll-Stand heute">
+      <div class="pot-fill" style="width:${pct}%;background:${STATUS_COLOR[i.status]}"></div>
+      <div class="pot-soll" style="left:${sollPct}%"></div>
+    </div>
+    <div class="pot-nums">
+      <span><strong>${fmtExact(round2(i.saved))}</strong> von ${fmtExact(e.amount)}</span>
+      <span>Soll heute ${fmtExact(round2(i.soll))}</span>
+    </div>
+    <div class="pot-rate">Rate <strong>${fmtExact(round2(i.rate))}</strong>/Mt.${i.booked ? ' <span style="color:var(--green)">✓ verbucht</span>' : ''}${i.catchUp ? ` <span style="color:var(--orange)">· Nachholbedarf (normal ${fmtExact(round2(i.normal))})</span>` : ''}</div>
+    ${i.shortfall > 0 ? `<div class="pot-warn">⚠️ Es fehlen ${fmtExact(round2(i.shortfall))} bis zur Fälligkeit</div>` : ''}
+    <div class="pot-actions">
+      <button class="btn btn-ghost" onclick="openPotCorrection('${e.id}')">✏️ Stand</button>
+      <button class="btn btn-primary" onclick="openPaidModal('${e.id}')">✓ Bezahlt</button>
+    </div>
+  </div>`;
+}
+
+function bookMonthlyReserve() {
+  const pots = reserveExpenses();
+  if (!pots.length) return;
+  if (state.settings.reserveDepositMonth === monthKey()
+      && !confirm('Die Einzahlung für diesen Monat ist bereits verbucht. Nochmals verbuchen?')) return;
+  // Raten zuerst berechnen, dann gutschreiben
+  // Bei erneutem Verbuchen im selben Monat wird die frisch berechnete Rate verwendet
+  const rates = pots.map(e => { const i = reserveInfo({ ...e, reserveBookedMonth: null }); return round2(i.need <= 0 ? 0 : i.rate); });
+  pots.forEach((e, i) => {
+    e.reserveSaved = round2((e.reserveSaved || 0) + rates[i]);
+    const again = e.reserveBookedMonth === monthKey();
+    e.reserveBookedAmount = round2((again ? e.reserveBookedAmount || 0 : 0) + rates[i]);
+    e.reserveBookedMonth = monthKey();
+  });
+  state.settings.reserveDepositMonth = monthKey();
+  saveState();
+  toast(`${fmtExact(round2(rates.reduce((a, b) => a + b, 0)))} auf ${pots.length} Töpfe verteilt ✓`);
+  refreshCurrent();
+}
+
+function openPotCorrection(id) {
+  const e = state.expenses.find(x => x.id === id);
+  if (!e) return;
+  const i = reserveInfo(e);
+  showModal(`
+  <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
+    <div class="modal">
+      <div class="modal-title">🐷 ${esc(e.name)}</div>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:12px">Soll-Stand heute: ${fmtExact(round2(i.soll))} · Ziel ${fmtExact(e.amount)}</div>
+      <div class="field"><label>Aktuell zurückgelegt (${state.currency})</label>
+        <input id="m-pot" type="number" inputmode="decimal" step="any" value="${round2(i.saved)}">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
+        <button class="btn btn-primary" onclick="savePotCorrection('${e.id}')">Speichern</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+function savePotCorrection(id) {
+  const e = state.expenses.find(x => x.id === id);
+  const v = parseFloat(el('m-pot')?.value);
+  if (!e || isNaN(v) || v < 0) { toast('Gültigen Betrag angeben'); return; }
+  e.reserveSaved = round2(v);
+  saveState(); closeModal(); toast('Stand angepasst ✓'); refreshCurrent();
+}
+
+// "Bezahlt": Buchung mit vollem Betrag, Topf leeren, nächste Fälligkeit +1 Zyklus
+function openPaidModal(id) {
+  const e = state.expenses.find(x => x.id === id);
+  if (!e) return;
+  const reserve = hasReserve(e);
+  const saved = e.reserveSaved || 0;
+  const next = addMonthsISO(e.nextDue || localISO(), cycleOf(e), e.dueDay);
+  showModal(`
+  <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
+    <div class="modal">
+      <div class="modal-title">✓ ${esc(e.name)} bezahlt</div>
+      ${reserve && saved < e.amount ? `<div class="pot-warn" style="margin-bottom:12px">⚠️ Im Topf sind erst ${fmtExact(round2(saved))} – es fehlen ${fmtExact(round2(e.amount - saved))}. Der Rest geht zulasten des freien Budgets.</div>` : ''}
+      <div class="field"><label>Bezahlter Betrag (${state.currency})</label>
+        <input id="m-paid-amount" type="number" inputmode="decimal" step="any" value="${e.amount}">
+      </div>
+      <div class="field"><label>Datum</label>
+        <input id="m-paid-date" type="date" value="${localISO()}">
+      </div>
+      ${state.accounts.length ? `
+      <div class="field"><label>Von Konto (Saldo wird angepasst)</label>
+        <select id="m-account">${accountOptions(e.reserveAccountId)}</select>
+      </div>` : ''}
+      <div style="font-size:12px;color:var(--text2)">
+        ${reserve ? `Der Topf wird um den Betrag geleert${saved > e.amount ? ' (Überschuss bleibt drin)' : ''}. ` : ''}Nächste Fälligkeit: <strong style="color:var(--text)">${parseISO(next).toLocaleDateString('de-CH')}</strong>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
+        <button class="btn btn-primary" onclick="savePaid('${e.id}')">Bezahlt ✓</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+function savePaid(id) {
+  const e = state.expenses.find(x => x.id === id);
+  const amount = parseFloat(el('m-paid-amount')?.value);
+  const date = el('m-paid-date')?.value || localISO();
+  if (!e || isNaN(amount) || amount <= 0) { toast('Betrag angeben'); return; }
+  const reserve = hasReserve(e);
+  const tx = { id: uid(), name: e.name, type: 'expense', amount: round2(amount), category: e.category, date,
+    note: reserve ? 'Aus Rückstellung bezahlt' : '', accountId: el('m-account')?.value || null,
+    expenseId: e.id, fromReserve: reserve };
+  if (!state.transactions) state.transactions = [];
+  state.transactions.push(tx);
+  applyTxToAccount(tx, +1);
+  if (reserve) e.reserveSaved = round2(Math.max(0, (e.reserveSaved || 0) - amount));
+  e.nextDue = addMonthsISO(e.nextDue || date, cycleOf(e), e.dueDay);
+  saveState(); closeModal();
+  toast(`Bezahlt ✓ · nächste Fälligkeit ${parseISO(e.nextDue).toLocaleDateString('de-CH')}`);
+  refreshCurrent();
+}
+
+// ── Cashflow-Vorschau: tatsächlich fällige Zahlungen der nächsten 12 Monate ─
+let cashflowChartInst = null;
+
+function cashflowPreview() {
+  const now = new Date();
+  const months = Array.from({ length: 12 }, (_, i) => monthKey(new Date(now.getFullYear(), now.getMonth() + i, 1)));
+  const idx = Object.fromEntries(months.map((k, i) => [k, i]));
+  const running = new Array(12).fill(0);
+  const oneOff = new Array(12).fill(0);
+  const items = months.map(() => []);
+  // Laufend: monatliche Ausgaben + Schuldenraten + nicht-monatliche ohne Datum (als Durchschnitt)
+  const base = state.expenses.reduce((s, e) => s + (!isIrregular(e) || !e.nextDue ? monthlyAmt(e) : 0), 0) + totalDebtPay();
+  running.fill(base);
+  const endKey = months[11];
+  for (const e of state.expenses) {
+    if (!isIrregular(e) || !e.nextDue) continue;
+    let d = e.nextDue, guard = 0;
+    while (d.slice(0, 7) <= endKey && guard++ < 40) {
+      const k = d.slice(0, 7) < months[0] ? months[0] : d.slice(0, 7); // Überfälliges im aktuellen Monat
+      oneOff[idx[k]] += e.amount;
+      items[idx[k]].push(e);
+      d = addMonthsISO(d, cycleOf(e), e.dueDay);
+    }
+  }
+  const avg = totalExpenses() + totalDebtPay();
+  return { months, running, oneOff, items, avg };
+}
+
+function renderCashflowPreview() {
+  const card = el('cashflow-card');
+  if (!card) return;
+  if (!state.expenses.length && !state.debts.length) {
+    if (cashflowChartInst) { cashflowChartInst.destroy(); cashflowChartInst = null; }
+    card.innerHTML = '<div style="font-size:13px;color:var(--text2)">Erfasse regelmässige Ausgaben, um die Vorschau zu sehen.</div>';
+    return;
+  }
+  const { months, running, oneOff, items, avg } = cashflowPreview();
+  const totals = running.map((r, i) => r + oneOff[i]);
+  const peak = Math.max(...totals);
+  const peakIdx = totals.indexOf(peak);
+  const label = k => { const [y, m] = k.split('-'); return new Date(y, m - 1, 1).toLocaleDateString('de-CH', { month: 'short', year: '2-digit' }); };
+  const peakMonths = months.map((k, i) => ({ k, i })).filter(x => items[x.i].length);
+  card.innerHTML = `
+    <div class="kpi-grid" style="margin-bottom:12px">
+      <div class="kpi-item"><div class="kpi-label">Ø pro Monat</div><div class="kpi-value">${fmt(avg)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Spitzenmonat</div><div class="kpi-value red">${fmt(peak)}</div><div style="font-size:11px;color:var(--text2)">${monthLabel(months[peakIdx])}</div></div>
+    </div>
+    <div class="chart-wrap" style="height:190px"><canvas id="cashflow-chart"></canvas></div>
+    ${peakMonths.length ? `
+    <div class="card-title" style="margin:14px 0 8px">Einmalzahlungen</div>
+    ${peakMonths.map(({ k, i }) => `
+      <div class="cf-row">
+        <span class="cf-month">${label(k)}</span>
+        <span class="cf-items">${items[i].map(e => `${esc(e.name)}${hasReserve(e) ? ' 🐷' : ''}`).join(', ')}</span>
+        <strong>${fmt(oneOff[i])}</strong>
+      </div>`).join('')}
+    <div style="font-size:11px;color:var(--text2);margin-top:6px">🐷 = durch Rückstellung gedeckt · Linie = gleichmässiger Durchschnitt</div>` : ''}`;
+
+  if (!window.Chart) return;
+  if (cashflowChartInst) cashflowChartInst.destroy();
+  cashflowChartInst = new Chart(el('cashflow-chart'), {
+    type: 'bar',
+    data: {
+      labels: months.map(k => { const [y, m] = k.split('-'); return new Date(y, m - 1, 1).toLocaleDateString('de-CH', { month: 'short' }); }),
+      datasets: [
+        { label: 'Laufend', data: running, backgroundColor: '#475569', stack: 'x', borderRadius: 3, order: 2 },
+        { label: 'Einmalzahlungen', data: oneOff, backgroundColor: '#f97316', stack: 'x', borderRadius: 3, order: 2 },
+        { label: 'Ø Monat', data: months.map(() => avg), type: 'line', stack: 'avg', borderColor: '#818cf8', borderDash: [5, 4],
+          borderWidth: 2, pointRadius: 0, fill: false, order: 1 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#94a3b8', font: { size: 11 }, boxWidth: 12 } },
+        tooltip: { backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
+          callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.y) } }
+      },
+      scales: {
+        x: { stacked: true, ticks: { color: '#475569', font: { size: 10 }, maxRotation: 0 }, grid: { display: false } },
+        y: { stacked: true, ticks: { color: '#475569', font: { size: 10 }, callback: v => fmtK(v) }, grid: { color: '#273549' } }
+      }
+    }
+  });
 }
 
 // ── 12-Monats-Bericht ──────────────────────────────────────────────────────
@@ -778,7 +1163,8 @@ function renderReport() {
     card.innerHTML = '<div style="font-size:13px;color:var(--text2)">Sobald du Buchungen erfasst oder importierst, siehst du hier deinen Verlauf.</div>';
     return;
   }
-  const avgExp = active.reduce((s, t) => s + t.expense, 0) / active.length;
+  const avgExp = active.reduce((s, t) => s + t.expense - t.reserveExpense, 0) / active.length;
+  const reserveTotal = totals.reduce((s, t) => s + t.reserveExpense, 0);
   const avgInc = active.reduce((s, t) => s + t.income, 0) / active.length;
   const byCat = {};
   totals.forEach(t => t.txs.filter(x => x.type !== 'income').forEach(x => { byCat[x.category] = (byCat[x.category] || 0) + x.amount; }));
@@ -788,9 +1174,10 @@ function renderReport() {
   card.innerHTML = `
     <div class="kpi-grid" style="margin-bottom:12px">
       <div class="kpi-item"><div class="kpi-label">Ø Einnahmen/Mt.</div><div class="kpi-value green">${fmtK(avgInc)}</div></div>
-      <div class="kpi-item"><div class="kpi-label">Ø Ausgaben/Mt.</div><div class="kpi-value red">${fmtK(avgExp)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Ø Ausgaben/Mt.</div><div class="kpi-value red">${fmtK(avgExp)}</div>${reserveTotal > 0 ? `<div style="font-size:11px;color:var(--text2)">ohne Rückstellungen</div>` : ''}</div>
     </div>
     <div class="chart-wrap" style="height:180px"><canvas id="report-chart"></canvas></div>
+    ${reserveTotal > 0 ? `<div style="font-size:11px;color:var(--text2);margin-top:6px">🐷 ${fmt(reserveTotal)} aus Rückstellungen bezahlt – im Monat der Zahlung separat dargestellt, das Geld war bereits zurückgelegt.</div>` : ''}
     <div class="card-title" style="margin:14px 0 8px">Top-Kategorien (12 Mt.)</div>
     ${topCats.map(([cat, amt]) => `
       <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
@@ -806,8 +1193,10 @@ function renderReport() {
     data: {
       labels: months.map(k => { const [y, m] = k.split('-'); return new Date(y, m - 1, 1).toLocaleDateString('de-CH', { month: 'short' }); }),
       datasets: [
-        { label: 'Einnahmen', data: totals.map(t => t.income),  backgroundColor: '#10b981', borderRadius: 4 },
-        { label: 'Ausgaben',  data: totals.map(t => t.expense), backgroundColor: '#ef4444', borderRadius: 4 }
+        { label: 'Einnahmen', data: totals.map(t => t.income),  backgroundColor: '#10b981', borderRadius: 4, stack: 'in' },
+        { label: 'Ausgaben',  data: totals.map(t => t.expense - t.reserveExpense), backgroundColor: '#ef4444', borderRadius: 4, stack: 'out' },
+        ...(reserveTotal > 0 ? [{ label: 'Aus Rückstellung', data: totals.map(t => t.reserveExpense), backgroundColor: '#f59e0b88',
+            borderColor: '#f59e0b', borderWidth: 1, borderRadius: 4, stack: 'out' }] : [])
       ]
     },
     options: {
@@ -819,8 +1208,8 @@ function renderReport() {
           callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.y) } }
       },
       scales: {
-        x: { ticks: { color: '#475569', font: { size: 10 }, maxRotation: 0 }, grid: { display: false } },
-        y: { ticks: { color: '#475569', font: { size: 10 }, callback: v => fmtK(v) }, grid: { color: '#273549' } }
+        x: { stacked: true, ticks: { color: '#475569', font: { size: 10 }, maxRotation: 0 }, grid: { display: false } },
+        y: { stacked: true, ticks: { color: '#475569', font: { size: 10 }, callback: v => fmtK(v) }, grid: { color: '#273549' } }
       }
     }
   });
@@ -1152,7 +1541,7 @@ function renderAccountsInVermoegen() {
         <div class="item-icon" style="background:rgba(99,102,241,.15)">${typeIcon[a.type] || '💳'}</div>
         <div>
           <div class="item-name">${esc(a.name)}</div>
-          <div class="item-sub">${typeLabel[a.type] || a.type}</div>
+          <div class="item-sub">${typeLabel[a.type] || a.type}${(() => { const r = reserveExpenses().filter(e => e.reserveAccountId === a.id).reduce((s, e) => s + (e.reserveSaved || 0), 0); return r > 0 ? ` · 🐷 ${fmtExact(round2(r))} reserviert` : ''; })()}</div>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
@@ -1844,36 +2233,51 @@ const EXPENSE_CATS = ['Wohnen','Lebensmittel','Transport','Unterhaltung','Gesund
                       'Versicherungen','Kleidung','Bildung','Haustiere','Freizeit','Ausgabe'];
 
 function openExpenseModal(prefill = null) {
+  const freq = prefill?.frequency || 'monthly';
+  // Neue jährliche/halbjährliche Ausgaben: Rückstellung standardmässig an
+  const reserveDefault = prefill ? !!prefill.reserve : null;
   showModal(`
   <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
     <div class="modal">
       <div class="modal-title">${prefill ? 'Ausgabe bearbeiten' : 'Ausgabe hinzufügen'}</div>
       <div class="field"><label>Bezeichnung</label>
-        <input id="m-name" type="text" placeholder="z.B. Miete" value="${esc(prefill?.name)}">
+        <input id="m-name" type="text" placeholder="z.B. Miete, Autoversicherung" value="${esc(prefill?.name)}">
       </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
           ${EXPENSE_CATS.map(c => `<option value="${c}" ${prefill?.category === c ? 'selected' : ''}>${iconFor(c)} ${c}</option>`).join('')}
         </select>
       </div>
-      <div class="field"><label>Häufigkeit</label>
-        <select id="m-freq" onchange="updateExpenseAmountLabel()">
-          <option value="monthly" ${prefill?.frequency !== 'yearly' ? 'selected' : ''}>📅 Monatlich</option>
-          <option value="yearly"  ${prefill?.frequency === 'yearly'  ? 'selected' : ''}>📆 Jährlich (wird auf Monate umgerechnet)</option>
+      <div class="field"><label>Rhythmus</label>
+        <select id="m-freq" onchange="onExpenseFreqChange()">
+          ${Object.entries(CYCLE_LABEL).map(([k, l]) => `<option value="${k}" ${freq === k ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
       </div>
       <div class="field"><label id="m-amount-label">Betrag (${state.currency})</label>
         <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.amount || ''}" oninput="updateExpenseAmountLabel()">
         <div id="m-amount-hint" style="font-size:12px;color:var(--text2);margin-top:4px"></div>
       </div>
-      <div style="display:flex;gap:8px">
-        <div class="field" style="flex:1"><label>Fällig am Tag (optional)</label>
-          <input id="m-due" type="number" inputmode="numeric" min="1" max="31" placeholder="z.B. 1" value="${prefill?.dueDay || ''}">
+      <div class="field" id="m-due-wrap"><label>Fällig am Tag (optional)</label>
+        <input id="m-due" type="number" inputmode="numeric" min="1" max="31" placeholder="z.B. 1" value="${prefill?.dueDay || ''}">
+      </div>
+      <div id="m-irregular-wrap">
+        <div class="field"><label>Nächste Fälligkeit</label>
+          <input id="m-next-due" type="date" value="${prefill?.nextDue || ''}" oninput="updateExpenseAmountLabel()">
         </div>
-        <div class="field" style="flex:1" id="m-due-month-wrap"><label>im Monat</label>
-          <select id="m-due-month">
-            ${Array.from({ length: 12 }, (_, i) => `<option value="${i + 1}" ${(prefill?.dueMonth || 1) === i + 1 ? 'selected' : ''}>${new Date(2000, i, 1).toLocaleDateString('de-CH', { month: 'long' })}</option>`).join('')}
-          </select>
+        <label class="check-row">
+          <input id="m-reserve" type="checkbox" ${reserveDefault ? 'checked' : ''} data-touched="${prefill ? '1' : ''}"
+                 onchange="this.dataset.touched='1';updateExpenseAmountLabel()">
+          <span><strong>Rückstellung bilden</strong><br><span style="font-size:12px;color:var(--text2)">Jeden Monat einen Teil zurücklegen, damit der Betrag bei Fälligkeit bereit ist</span></span>
+        </label>
+        <div id="m-reserve-wrap">
+          <div class="field"><label>Bereits zurückgelegt (${state.currency})</label>
+            <input id="m-reserve-saved" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.reserveSaved || ''}" oninput="updateExpenseAmountLabel()">
+          </div>
+          ${state.accounts.length ? `
+          <div class="field"><label>Liegt auf Konto (optional)</label>
+            <select id="m-reserve-account">${accountOptions(prefill?.reserveAccountId)}</select>
+          </div>` : ''}
+          <div id="m-reserve-hint" class="reserve-hint"></div>
         </div>
       </div>
       <div class="field"><label>Budget-Limit/Monat (${state.currency}, optional)</label>
@@ -1888,40 +2292,74 @@ function openExpenseModal(prefill = null) {
       </div>
     </div>
   </div>`);
-  setTimeout(updateExpenseAmountLabel, 0);
+  onExpenseFreqChange();
+}
+
+function onExpenseFreqChange() {
+  const freq = el('m-freq')?.value;
+  const cb = el('m-reserve');
+  // Standard (solange nicht selbst angeklickt): an bei jährlich/halbjährlich
+  if (cb && !cb.dataset.touched) cb.checked = freq === 'yearly' || freq === 'semiannual';
+  updateExpenseAmountLabel();
+}
+
+// Formularwerte als (vorläufige) Ausgabe lesen – für Live-Vorschau und Speichern
+function readExpenseForm() {
+  const frequency = el('m-freq')?.value || 'monthly';
+  const irregular = frequency !== 'monthly';
+  return {
+    frequency,
+    amount: parseFloat(el('m-amount')?.value) || 0,
+    nextDue: irregular ? (el('m-next-due')?.value || null) : null,
+    reserve: irregular && !!el('m-reserve')?.checked,
+    reserveSaved: irregular ? Math.max(0, parseFloat(el('m-reserve-saved')?.value) || 0) : 0,
+    reserveAccountId: irregular ? (el('m-reserve-account')?.value || null) : null
+  };
 }
 
 function updateExpenseAmountLabel() {
-  const freq = el('m-freq')?.value;
-  const amount = parseFloat(el('m-amount')?.value) || 0;
-  const hint = el('m-amount-hint');
-  const label = el('m-amount-label');
+  const hint = el('m-amount-hint'), label = el('m-amount-label');
   if (!hint || !label) return;
-  const monthWrap = el('m-due-month-wrap');
-  if (monthWrap) monthWrap.style.display = freq === 'yearly' ? '' : 'none';
-  if (freq === 'yearly') {
-    label.textContent = `Betrag pro Jahr (${state.currency})`;
-    hint.textContent = amount > 0 ? `= ${fmt(amount / 12)} pro Monat` : 'Jährlicher Betrag – wird durch 12 geteilt';
-  } else {
+  const f = readExpenseForm();
+  const irregular = f.frequency !== 'monthly';
+  el('m-irregular-wrap').style.display = irregular ? '' : 'none';
+  el('m-due-wrap').style.display = irregular ? 'none' : '';
+  el('m-reserve-wrap').style.display = f.reserve ? '' : 'none';
+  if (!irregular) {
     label.textContent = `Betrag pro Monat (${state.currency})`;
     hint.textContent = '';
+    return;
   }
+  label.textContent = `Betrag pro Zahlung (${state.currency})`;
+  hint.textContent = f.amount > 0 ? `= ${fmtExact(round2(f.amount / CYCLE_MONTHS[f.frequency]))} pro Monat im Durchschnitt` : `Wird pro ${CYCLE_UNIT[f.frequency]} bezahlt`;
+  const rh = el('m-reserve-hint');
+  if (!f.reserve) { rh.innerHTML = ''; return; }
+  if (!f.nextDue || f.amount <= 0) { rh.innerHTML = 'Gib Betrag und nächste Fälligkeit an, um die Monatsrate zu berechnen.'; return; }
+  const info = reserveInfo(f);
+  rh.innerHTML = `Monatliche Rückstellung: <strong>${fmtExact(round2(info.rate))}</strong>` +
+    (info.catchUp ? ` <span style="color:var(--orange)">(Nachholbedarf – normal ${fmtExact(round2(info.normal))})</span>` : '') +
+    `<br>Soll-Stand heute: ${fmtExact(round2(info.soll))} · fällig in ${info.days} Tagen`;
 }
+
+const round2 = n => Math.round(n * 100) / 100;
 
 function saveExpense() {
   const name        = el('m-name')?.value.trim();
   const amount      = parseFloat(el('m-amount')?.value);
   const category    = el('m-cat')?.value;
-  const frequency   = el('m-freq')?.value || 'monthly';
   const budgetLimit = parseFloat(el('m-limit')?.value) || 0;
   const note        = el('m-note')?.value.trim();
-  const dueDay      = readDueDay('m-due');
-  const dueMonth    = frequency === 'yearly' ? parseInt(el('m-due-month')?.value) || 1 : null;
+  const f           = readExpenseForm();
   if (!name || isNaN(amount) || amount <= 0) { toast('Name und Betrag angeben'); return; }
+  if (f.reserve && !f.nextDue) { toast('Für die Rückstellung die nächste Fälligkeit angeben'); return; }
+  const irregular = f.frequency !== 'monthly';
+  // Bei nicht-monatlichen Ausgaben bestimmt das Fälligkeitsdatum den Tag (verhindert "Wandern" beim Weiterschalten)
+  const dueDay = irregular ? (f.nextDue ? parseISO(f.nextDue).getDate() : null) : readDueDay('m-due');
+  const data = { name, amount, category, budgetLimit, note, dueDay, dueMonth: null, ...f };
   if (editContext) {
-    Object.assign(state.expenses.find(x => x.id === editContext.id), { name, amount, category, frequency, budgetLimit, note, dueDay, dueMonth });
+    Object.assign(state.expenses.find(x => x.id === editContext.id), data);
   } else {
-    state.expenses.push({ id: uid(), name, amount, category, frequency, budgetLimit, note, dueDay, dueMonth });
+    state.expenses.push({ id: uid(), ...data });
   }
   saveState(); closeModal(); toast('Gespeichert ✓');
   refreshCurrent();
