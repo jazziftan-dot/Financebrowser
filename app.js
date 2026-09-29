@@ -286,6 +286,8 @@ RENDERERS.uebersicht = function() {
   el('dash-savings').textContent      = fmt(savings);
   el('dash-savings').className = 'val ' + (savings >= 0 ? 'green' : 'red');
 
+  renderDashMonth();
+
   // Notfallfonds
   const em = emergencyStatus();
   const emPct = Math.min(100, emergencyMonths() / 6 * 100);
@@ -493,7 +495,7 @@ RENDERERS.einkommen = function() {
   list.innerHTML = state.income.length
     ? state.income.map(i => listItem({
         icon: iconFor(i.category), color: colorFor(i.category),
-        name: esc(i.name), sub: i.category + (i.note ? ' · ' + esc(i.note) : ''),
+        name: esc(i.name), sub: i.category + (i.dueDay ? ` · am ${i.dueDay}.` : '') + (i.note ? ' · ' + esc(i.note) : ''),
         amount: fmt(i.amount), amountColor: 'var(--green)', id: i.id, type: 'income'
       })).join('')
     : emptyState('💼', 'Noch keine Einnahmen erfasst.');
@@ -543,7 +545,7 @@ RENDERERS.ausgaben = function() {
             <div class="item-icon" style="background:${colorFor(e.category)}22">${iconFor(e.category)}</div>
             <div style="min-width:0">
               <div class="item-name">${esc(e.name)} ${freqLabel}</div>
-              <div class="item-sub">${e.category} · ${pct}% Einkomm.${hasLim ? ' · Limit ' + fmt(e.budgetLimit) : ''}</div>
+              <div class="item-sub">${e.category}${e.dueDay ? ` · am ${e.dueDay}.` : ''} · ${pct}% Einkomm.${hasLim ? ' · Limit ' + fmt(e.budgetLimit) : ''}</div>
               ${hasLim ? `<div class="budget-bar"><div class="budget-fill ${bCls}" style="width:${bpct}%"></div></div>` : ''}
             </div>
           </div>
@@ -564,30 +566,180 @@ RENDERERS.ausgaben = function() {
   renderTransactions();
 };
 
+// ── Buchungen pro Monat ────────────────────────────────────────────────────
+const monthKey   = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+const monthLabel = key => { const [y, m] = key.split('-'); return new Date(y, m - 1, 1).toLocaleDateString('de-CH', { month: 'long', year: 'numeric' }); };
+const localISO   = (d = new Date()) => `${monthKey(d)}-${String(d.getDate()).padStart(2, '0')}`;
+let txMonth = monthKey();
+
+const txOfMonth = key => (state.transactions || []).filter(t => t.date?.startsWith(key));
+
+function monthTotals(key) {
+  const txs = txOfMonth(key);
+  const income  = txs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+  const expense = txs.filter(t => t.type !== 'income').reduce((s, t) => s + t.amount, 0);
+  return { txs, income, expense, saldo: income - expense };
+}
+
+// Budget-Limit pro Kategorie = Summe der Limits aller regelmässigen Ausgaben dieser Kategorie
+function categoryLimits() {
+  const lim = {};
+  for (const e of state.expenses) if (e.budgetLimit > 0) lim[e.category] = (lim[e.category] || 0) + e.budgetLimit;
+  return lim;
+}
+
+function readDueDay(id) {
+  const d = parseInt(el(id)?.value);
+  return d >= 1 && d <= 31 ? d : null;
+}
+
+// Nächste Fälligkeiten von Einkommen und Fixkosten mit Fälligkeitstag
+function upcomingPayments(days = 14) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const end = new Date(today); end.setDate(end.getDate() + days);
+  const at = (y, m, day) => new Date(y, m, Math.min(day, new Date(y, m + 1, 0).getDate()));
+  const nextDate = (item) => {
+    const y = today.getFullYear(), m = today.getMonth();
+    const cands = item.frequency === 'yearly'
+      ? [at(y, (item.dueMonth || 1) - 1, item.dueDay), at(y + 1, (item.dueMonth || 1) - 1, item.dueDay)]
+      : [at(y, m, item.dueDay), at(y, m + 1, item.dueDay)];
+    return cands.find(d => d >= today);
+  };
+  const out = [];
+  const add = (item, type) => {
+    if (!item.dueDay) return;
+    const date = nextDate(item);
+    if (date && date <= end) out.push({ name: item.name, amount: item.amount, category: item.category, type, date,
+      days: Math.round((date - today) / 864e5) });
+  };
+  state.income.forEach(i => add(i, 'income'));
+  state.expenses.forEach(e => add(e, 'expense'));
+  return out.sort((a, b) => a.date - b.date);
+}
+
+function renderDashMonth() {
+  const key = monthKey();
+  const { income, expense, saldo, txs } = monthTotals(key);
+  el('dash-month-title').textContent = monthLabel(key);
+  const now = new Date();
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const elapsed = now.getDate() / daysInMonth * 100;
+  // Frei verfügbar = geplanter Überschuss (nach Fixkosten, Investitionen, Raten) + Saldo der Buchungen
+  const free = monthlySavings() + saldo;
+  const base = Math.max(1, monthlySavings() + income);
+  const usedPct = Math.max(0, Math.min(100, expense / base * 100));
+  el('dash-month').innerHTML = `
+    <div class="kpi-grid kpi-grid-3">
+      <div class="kpi-item"><div class="kpi-label">Einnahmen</div><div class="kpi-value green">${fmtK(income)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Ausgaben</div><div class="kpi-value red">${fmtK(expense)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Noch frei</div><div class="kpi-value ${free >= 0 ? 'green' : 'red'}">${fmtK(free)}</div></div>
+    </div>
+    <div style="margin-top:10px">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2);margin-bottom:4px">
+        <span>Freies Budget verbraucht: ${usedPct.toFixed(0)}%</span><span>Monat: ${elapsed.toFixed(0)}%</span>
+      </div>
+      <div class="rate-bar" style="position:relative">
+        <div style="height:100%;width:${usedPct}%;background:${usedPct > elapsed + 10 ? 'var(--orange)' : 'var(--green)'};border-radius:99px"></div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text2);margin-top:6px">${txs.length ? `${txs.length} Buchung${txs.length === 1 ? '' : 'en'} diesen Monat` : 'Erfasse Einkäufe & Extras als Buchung, um deinen Monat zu verfolgen.'}</div>`;
+
+  const up = upcomingPayments(14);
+  el('dash-upcoming').innerHTML = up.length ? `<div class="item-list">${up.slice(0, 6).map(p => `
+    <div class="upcoming-row">
+      <span class="upcoming-when">${p.days === 0 ? 'Heute' : p.days === 1 ? 'Morgen' : 'in ' + p.days + ' T.'}</span>
+      <span class="upcoming-name">${iconFor(p.category)} ${esc(p.name)}</span>
+      <span style="font-weight:600;color:${p.type === 'income' ? 'var(--green)' : 'var(--red)'}">${p.type === 'income' ? '+' : '−'}${fmt(p.amount)}</span>
+    </div>`).join('')}</div>`
+    : '<div style="font-size:13px;color:var(--text2)">Keine Zahlungen in den nächsten 14 Tagen. Tipp: Trage bei Einkommen und Ausgaben einen Fälligkeitstag ein.</div>';
+}
+
+// Einmal pro Monat automatisch den Stand des Nettovermögens festhalten
+function autoNetworthSnapshot() {
+  const key = monthKey();
+  const hasData = state.accounts.length || state.portfolioValue || state.debts.length;
+  if (!hasData || state.networthHistory.some(h => h.date.startsWith(key))) return;
+  state.networthHistory.push({ date: localISO(), networth: netWorth() });
+  state.networthHistory.sort((a, b) => a.date.localeCompare(b.date));
+  saveState();
+}
+
+function shiftTxMonth(delta) {
+  const [y, m] = txMonth.split('-').map(Number);
+  txMonth = monthKey(new Date(y, m - 1 + delta, 1));
+  renderTransactions();
+}
+
+// Buchung wirkt sich auf verknüpftes Konto aus (sign = +1 anwenden, -1 rückgängig machen)
+function applyTxToAccount(tx, sign) {
+  if (!tx?.accountId) return;
+  const acc = state.accounts.find(a => a.id === tx.accountId);
+  if (acc) acc.balance += sign * (tx.type === 'income' ? tx.amount : -tx.amount);
+}
+
 function renderTransactions() {
   const list = el('transactions-list');
   if (!list) return;
-  const txs = state.transactions || [];
-  if (!txs.length) { list.innerHTML = emptyState('📒', 'Noch keine einmaligen Buchungen.'); return; }
+  el('tx-month-label').textContent = monthLabel(txMonth);
+
+  const { txs, income, expense, saldo } = monthTotals(txMonth);
+  el('tx-month-summary').innerHTML = `
+    <div class="kpi-grid kpi-grid-3" style="margin-bottom:10px">
+      <div class="kpi-item"><div class="kpi-label">Einnahmen</div><div class="kpi-value green">${fmtK(income)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Ausgaben</div><div class="kpi-value red">${fmtK(expense)}</div></div>
+      <div class="kpi-item"><div class="kpi-label">Saldo</div><div class="kpi-value ${saldo >= 0 ? 'green' : 'red'}">${saldo >= 0 ? '+' : ''}${fmtK(saldo)}</div></div>
+    </div>`;
+
+  // Ausgaben nach Kategorie, verglichen mit dem Budget-Limit
+  const byCat = {};
+  txs.filter(t => t.type !== 'income').forEach(t => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+  const limits = categoryLimits();
+  const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const maxAmt = cats.length ? cats[0][1] : 0;
+  el('tx-category-breakdown').innerHTML = cats.length ? `
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-title">Ausgaben nach Kategorie</div>
+      ${cats.map(([cat, amt]) => {
+        const lim = limits[cat];
+        const pct = lim ? Math.min(100, amt / lim * 100) : amt / maxAmt * 100;
+        const cls = !lim ? '' : amt > lim ? 'budget-over' : amt > lim * .8 ? 'budget-warn' : 'budget-ok';
+        return `
+        <div style="margin-bottom:9px">
+          <div style="display:flex;justify-content:space-between;font-size:13px">
+            <span>${iconFor(cat)} ${esc(cat)}</span>
+            <span style="font-weight:600;${lim && amt > lim ? 'color:var(--red)' : ''}">${fmt(amt)}${lim ? ` <span style="color:var(--text2);font-weight:400">/ ${fmt(lim)}</span>` : ''}</span>
+          </div>
+          <div class="budget-bar" style="height:5px"><div class="budget-fill ${cls}" style="width:${pct}%;${cls ? '' : 'background:' + colorFor(cat)}"></div></div>
+        </div>`;
+      }).join('')}
+      ${Object.keys(limits).length ? '' : '<div style="font-size:11px;color:var(--text2)">Tipp: Setze bei einer Ausgabe ein Budget-Limit, um es hier zu vergleichen.</div>'}
+    </div>` : '';
+
+  if (!txs.length) { list.innerHTML = emptyState('📒', `Keine Buchungen im ${monthLabel(txMonth)}.`); return; }
+  const accName = id => state.accounts.find(a => a.id === id)?.name;
   const sorted = [...txs].sort((a, b) => b.date.localeCompare(a.date));
-  list.innerHTML = sorted.map(t => `
+  list.innerHTML = sorted.map(t => {
+    const acc = accName(t.accountId);
+    return `
     <div class="list-item">
       <div class="item-left">
-        <div class="item-icon" style="background:rgba(100,116,139,.15)">${t.type === 'income' ? '💰' : '💸'}</div>
-        <div style="min-width:0">
+        <div class="item-icon" style="background:${colorFor(t.category)}22">${iconFor(t.category)}</div>
+        <div>
           <div class="item-name">${esc(t.name)}</div>
-          <div class="item-sub">${t.category || '–'} · ${new Date(t.date).toLocaleDateString('de-CH')}</div>
+          <div class="item-sub">${esc(t.category || '–')} · ${new Date(t.date).toLocaleDateString('de-CH')}${acc ? ' · ' + esc(acc) : ''}</div>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
         <span class="item-amount" style="color:${t.type === 'income' ? 'var(--green)' : 'var(--red)'}">
-          ${t.type === 'income' ? '+' : '-'}${fmt(t.amount)}
+          ${t.type === 'income' ? '+' : '−'}${fmt(t.amount)}
         </span>
         <div class="item-actions">
-          <button class="btn btn-danger btn-icon" onclick="deleteItem('transaction','${t.id}')">🗑️</button>
+          <button class="btn btn-ghost btn-icon" onclick="openEdit('transaction','${t.id}')" aria-label="Bearbeiten">✏️</button>
+          <button class="btn btn-danger btn-icon" onclick="deleteItem('transaction','${t.id}')" aria-label="Löschen">🗑️</button>
         </div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 // ── Vermögen (Investitionen + Schulden) ────────────────────────────────────
@@ -1144,6 +1296,8 @@ function renderGoals() {
         </div>
       </div>
 
+      <button class="btn btn-primary" style="width:100%;margin-bottom:12px" onclick="openGoalDepositModal('${g.id}')">💰 Einzahlen</button>
+
       <div class="progress-bar" style="height:10px">
         <div class="progress-fill" style="width:${pct}%"></div>
       </div>
@@ -1221,6 +1375,7 @@ function deleteItem(type, id) {
   const map = { income:'income', expense:'expenses', investment:'investments', debt:'debts', goal:'goals', account:'accounts', transaction:'transactions' };
   const key = map[type];
   if (!key) return;
+  if (type === 'transaction') applyTxToAccount(state.transactions.find(x => x.id === id), -1);
   state[key] = state[key].filter(x => x.id !== id);
   saveState(); toast('Gelöscht'); refreshCurrent();
 }
@@ -1254,12 +1409,13 @@ function showModal(html) {
 }
 
 function openEdit(type, id) {
-  const lists = { income:'income', expense:'expenses', investment:'investments', debt:'debts', goal:'goals', account:'accounts' };
+  const lists = { income:'income', expense:'expenses', investment:'investments', debt:'debts', goal:'goals', account:'accounts', transaction:'transactions' };
   const item = state[lists[type]]?.find(x => x.id === id);
   if (!item) return;
   editContext = { type, id };
   ({ income: openIncomeModal, expense: openExpenseModal, investment: openInvestmentModal,
-     debt: openDebtModal, goal: openGoalModal, account: openAccountItemModal })[type]?.(item);
+     debt: openDebtModal, goal: openGoalModal, account: openAccountItemModal,
+     transaction: openTransactionModal })[type]?.(item);
 }
 
 // ── Konten ─────────────────────────────────────────────────────────────────
@@ -1394,9 +1550,12 @@ function openIncomeModal(prefill = null) {
       </div>
       <div class="field"><label>Kategorie</label>
         <select id="m-cat">
-          ${['Lohn','Nebeneinkommen','Sonstiges'].map(c =>
+          ${INCOME_CATS.map(c =>
             `<option value="${c}" ${prefill?.category === c ? 'selected' : ''}>${c}</option>`).join('')}
         </select>
+      </div>
+      <div class="field"><label>Zahltag (Tag im Monat, optional)</label>
+        <input id="m-due" type="number" inputmode="numeric" min="1" max="31" placeholder="z.B. 25" value="${prefill?.dueDay || ''}">
       </div>
       <div class="field"><label>Notiz (optional)</label>
         <input id="m-note" type="text" value="${esc(prefill?.note)}">
@@ -1412,9 +1571,10 @@ function openIncomeModal(prefill = null) {
 function saveIncome() {
   const name = el('m-name')?.value.trim(), amount = parseFloat(el('m-amount')?.value);
   const category = el('m-cat')?.value, note = el('m-note')?.value.trim();
+  const dueDay = readDueDay('m-due');
   if (!name || isNaN(amount) || amount <= 0) { toast('Name und Betrag angeben'); return; }
-  if (editContext) { Object.assign(state.income.find(x => x.id === editContext.id), { name, amount, category, note }); }
-  else { state.income.push({ id: uid(), name, amount, category, note }); }
+  if (editContext) { Object.assign(state.income.find(x => x.id === editContext.id), { name, amount, category, note, dueDay }); }
+  else { state.income.push({ id: uid(), name, amount, category, note, dueDay }); }
   saveState(); closeModal(); toast('Gespeichert ✓');
   refreshCurrent();
 }
@@ -1437,7 +1597,7 @@ function openExpenseModal(prefill = null) {
         </select>
       </div>
       <div class="field"><label>Häufigkeit</label>
-        <select id="m-freq">
+        <select id="m-freq" onchange="updateExpenseAmountLabel()">
           <option value="monthly" ${prefill?.frequency !== 'yearly' ? 'selected' : ''}>📅 Monatlich</option>
           <option value="yearly"  ${prefill?.frequency === 'yearly'  ? 'selected' : ''}>📆 Jährlich (wird auf Monate umgerechnet)</option>
         </select>
@@ -1445,6 +1605,16 @@ function openExpenseModal(prefill = null) {
       <div class="field"><label id="m-amount-label">Betrag (${state.currency})</label>
         <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.amount || ''}" oninput="updateExpenseAmountLabel()">
         <div id="m-amount-hint" style="font-size:12px;color:var(--text2);margin-top:4px"></div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>Fällig am Tag (optional)</label>
+          <input id="m-due" type="number" inputmode="numeric" min="1" max="31" placeholder="z.B. 1" value="${prefill?.dueDay || ''}">
+        </div>
+        <div class="field" style="flex:1" id="m-due-month-wrap"><label>im Monat</label>
+          <select id="m-due-month">
+            ${Array.from({ length: 12 }, (_, i) => `<option value="${i + 1}" ${(prefill?.dueMonth || 1) === i + 1 ? 'selected' : ''}>${new Date(2000, i, 1).toLocaleDateString('de-CH', { month: 'long' })}</option>`).join('')}
+          </select>
+        </div>
       </div>
       <div class="field"><label>Budget-Limit/Monat (${state.currency}, optional)</label>
         <input id="m-limit" type="number" inputmode="decimal" step="any" placeholder="0 = kein Limit" value="${prefill?.budgetLimit || ''}">
@@ -1467,6 +1637,8 @@ function updateExpenseAmountLabel() {
   const hint = el('m-amount-hint');
   const label = el('m-amount-label');
   if (!hint || !label) return;
+  const monthWrap = el('m-due-month-wrap');
+  if (monthWrap) monthWrap.style.display = freq === 'yearly' ? '' : 'none';
   if (freq === 'yearly') {
     label.textContent = `Betrag pro Jahr (${state.currency})`;
     hint.textContent = amount > 0 ? `= ${fmt(amount / 12)} pro Monat` : 'Jährlicher Betrag – wird durch 12 geteilt';
@@ -1483,45 +1655,68 @@ function saveExpense() {
   const frequency   = el('m-freq')?.value || 'monthly';
   const budgetLimit = parseFloat(el('m-limit')?.value) || 0;
   const note        = el('m-note')?.value.trim();
+  const dueDay      = readDueDay('m-due');
+  const dueMonth    = frequency === 'yearly' ? parseInt(el('m-due-month')?.value) || 1 : null;
   if (!name || isNaN(amount) || amount <= 0) { toast('Name und Betrag angeben'); return; }
   if (editContext) {
-    Object.assign(state.expenses.find(x => x.id === editContext.id), { name, amount, category, frequency, budgetLimit, note });
+    Object.assign(state.expenses.find(x => x.id === editContext.id), { name, amount, category, frequency, budgetLimit, note, dueDay, dueMonth });
   } else {
-    state.expenses.push({ id: uid(), name, amount, category, frequency, budgetLimit, note });
+    state.expenses.push({ id: uid(), name, amount, category, frequency, budgetLimit, note, dueDay, dueMonth });
   }
   saveState(); closeModal(); toast('Gespeichert ✓');
   refreshCurrent();
 }
 
 // ── Einmalige Buchung Modal ────────────────────────────────────────────────
-function openTransactionModal() {
-  const today = new Date().toISOString().slice(0, 10);
+const INCOME_CATS = ['Lohn','Nebeneinkommen','Sonstiges'];
+
+function txCategoryOptions(type, selected) {
+  const cats = type === 'income' ? INCOME_CATS : EXPENSE_CATS;
+  return cats.map(c => `<option value="${c}" ${c === selected ? 'selected' : ''}>${iconFor(c)} ${c}</option>`).join('');
+}
+
+function updateTxCategories() {
+  const type = el('m-tx-type')?.value;
+  el('m-cat').innerHTML = txCategoryOptions(type, type === 'income' ? 'Sonstiges' : 'Ausgabe');
+}
+
+function accountOptions(selectedId) {
+  return `<option value="">— Kein Konto —</option>` + state.accounts.map(a =>
+    `<option value="${a.id}" ${a.id === selectedId ? 'selected' : ''}>${esc(a.name)} (${fmt(a.balance)})</option>`).join('');
+}
+
+function openTransactionModal(prefill = null) {
+  const type = prefill?.type || 'expense';
+  // Neue Buchung im gerade angezeigten Monat vorbelegen (heute, falls aktueller Monat)
+  const date = prefill?.date || (txMonth === monthKey() ? localISO() : txMonth + '-01');
   showModal(`
   <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
     <div class="modal">
-      <div class="modal-title">📝 Einmalige Buchung</div>
-      <div class="field"><label>Bezeichnung</label>
-        <input id="m-name" type="text" placeholder="z.B. Zahnarzt, Bonus">
-      </div>
+      <div class="modal-title">${prefill ? '✏️ Buchung bearbeiten' : '📝 Buchung erfassen'}</div>
       <div class="field"><label>Typ</label>
-        <select id="m-tx-type">
-          <option value="expense">💸 Ausgabe</option>
-          <option value="income">💰 Einnahme</option>
+        <select id="m-tx-type" onchange="updateTxCategories()">
+          <option value="expense" ${type === 'expense' ? 'selected' : ''}>💸 Ausgabe</option>
+          <option value="income"  ${type === 'income'  ? 'selected' : ''}>💰 Einnahme</option>
         </select>
+      </div>
+      <div class="field"><label>Bezeichnung</label>
+        <input id="m-name" type="text" placeholder="z.B. Wocheneinkauf, Zahnarzt, Bonus" value="${esc(prefill?.name)}">
       </div>
       <div class="field"><label>Betrag (${state.currency})</label>
-        <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0">
+        <input id="m-amount" type="number" inputmode="decimal" step="any" placeholder="0" value="${prefill?.amount ?? ''}">
       </div>
       <div class="field"><label>Kategorie</label>
-        <select id="m-cat">
-          ${EXPENSE_CATS.map(c => `<option value="${c}">${iconFor(c)} ${c}</option>`).join('')}
-        </select>
+        <select id="m-cat">${txCategoryOptions(type, prefill?.category || (type === 'income' ? 'Sonstiges' : 'Ausgabe'))}</select>
       </div>
       <div class="field"><label>Datum</label>
-        <input id="m-date" type="date" value="${today}">
+        <input id="m-date" type="date" value="${date}">
       </div>
+      ${state.accounts.length ? `
+      <div class="field"><label>Konto (optional – Saldo wird angepasst)</label>
+        <select id="m-account">${accountOptions(prefill?.accountId)}</select>
+      </div>` : ''}
       <div class="field"><label>Notiz (optional)</label>
-        <input id="m-note" type="text">
+        <input id="m-note" type="text" value="${esc(prefill?.note)}">
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
@@ -1534,10 +1729,22 @@ function openTransactionModal() {
 function saveTransaction() {
   const name = el('m-name')?.value.trim(), type = el('m-tx-type')?.value;
   const amount = parseFloat(el('m-amount')?.value), category = el('m-cat')?.value;
-  const date = el('m-date')?.value, note = el('m-note')?.value.trim();
+  const date = el('m-date')?.value || localISO(), note = el('m-note')?.value.trim();
+  const accountId = el('m-account')?.value || null;
   if (!name || isNaN(amount) || amount <= 0) { toast('Name und Betrag angeben'); return; }
   if (!state.transactions) state.transactions = [];
-  state.transactions.push({ id: uid(), name, type, amount, category, date, note });
+  const data = { name, type, amount, category, date, note, accountId };
+  const existing = editContext?.type === 'transaction' && state.transactions.find(x => x.id === editContext.id);
+  if (existing) {
+    applyTxToAccount(existing, -1);
+    Object.assign(existing, data);
+    applyTxToAccount(existing, +1);
+  } else {
+    const tx = { id: uid(), ...data };
+    state.transactions.push(tx);
+    applyTxToAccount(tx, +1);
+  }
+  txMonth = date.slice(0, 7); // zum Monat der Buchung springen
   saveState(); closeModal(); toast('Buchung gespeichert ✓');
   refreshCurrent();
 }
@@ -1800,6 +2007,44 @@ function openGoalModal(prefill = null) {
   </div>`);
 }
 
+function openGoalDepositModal(goalId) {
+  const g = state.goals.find(x => x.id === goalId);
+  if (!g) return;
+  const rem = Math.max(0, g.targetAmount - g.currentAmount);
+  showModal(`
+  <div class="modal-backdrop" id="modal-backdrop" onclick="handleBackdropClick(event)">
+    <div class="modal">
+      <div class="modal-title">${g.icon || '🎯'} In „${esc(g.name)}“ einzahlen</div>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:12px">Noch ${fmt(rem)} bis zum Ziel</div>
+      <div class="field"><label>Betrag (${state.currency})</label>
+        <input id="m-deposit" type="number" inputmode="decimal" step="any" placeholder="0">
+      </div>
+      ${state.accounts.length ? `
+      <div class="field"><label>Von Konto abbuchen (optional)</label>
+        <select id="m-account">${accountOptions(null)}</select>
+      </div>` : ''}
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
+        <button class="btn btn-primary" onclick="saveGoalDeposit('${g.id}')">Einzahlen ✓</button>
+      </div>
+    </div>
+  </div>`);
+}
+
+function saveGoalDeposit(goalId) {
+  const g = state.goals.find(x => x.id === goalId);
+  const amount = parseFloat(el('m-deposit')?.value);
+  if (!g || isNaN(amount) || amount === 0) { toast('Betrag angeben'); return; }
+  const accId = el('m-account')?.value;
+  const acc = accId && state.accounts.find(a => a.id === accId);
+  if (acc) acc.balance -= amount;
+  const wasDone = g.currentAmount >= g.targetAmount;
+  g.currentAmount = Math.max(0, g.currentAmount + amount);
+  saveState(); closeModal();
+  toast(!wasDone && g.currentAmount >= g.targetAmount ? `🎉 Ziel „${g.name}“ erreicht!` : `${fmt(amount)} eingezahlt ✓`);
+  refreshCurrent();
+}
+
 function pickGoalIcon(btn, icon) {
   document.querySelectorAll('.icon-pick').forEach(b => b.classList.remove('icon-sel'));
   btn.classList.add('icon-sel');
@@ -1864,6 +2109,7 @@ function openSettings() {
       <div style="height:1px;background:var(--border);margin:14px 0"></div>
       <div class="card-title" style="margin-bottom:10px">Daten-Backup</div>
       <button class="btn btn-ghost btn-full" onclick="exportData()">⬇️ Exportieren (JSON)</button>
+      <button class="btn btn-ghost btn-full" style="margin-top:8px" onclick="exportTransactionsCSV()">📊 Buchungen als CSV (Excel)</button>
       <div style="margin-top:8px">
         <label class="btn btn-ghost btn-full" style="cursor:pointer">
           ⬆️ Importieren (JSON)
@@ -1892,6 +2138,22 @@ function exportData() {
   URL.revokeObjectURL(url); toast('Exportiert ✓');
 }
 
+function exportTransactionsCSV() {
+  const txs = [...(state.transactions || [])].sort((a, b) => a.date.localeCompare(b.date));
+  if (!txs.length) { toast('Keine Buchungen vorhanden'); return; }
+  const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const accName = id => state.accounts.find(a => a.id === id)?.name || '';
+  const rows = [['Datum', 'Typ', 'Bezeichnung', 'Kategorie', 'Betrag', 'Konto', 'Notiz']]
+    .concat(txs.map(t => [t.date, t.type === 'income' ? 'Einnahme' : 'Ausgabe', t.name, t.category,
+      (t.type === 'income' ? t.amount : -t.amount).toFixed(2), accName(t.accountId), t.note]));
+  // Semikolon + BOM: öffnet direkt korrekt in Excel (CH/DE)
+  const csv = '﻿' + rows.map(r => r.map(cell).join(';')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const a = document.createElement('a'); a.href = url; a.download = `buchungen-${localISO()}.csv`; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('CSV exportiert ✓');
+}
+
 function importData(e) {
   const file = e.target.files?.[0]; if (!file) return;
   const reader = new FileReader();
@@ -1914,6 +2176,7 @@ function boot() {
     Chart.defaults.animation.duration = isTouch ? 250 : 400;
     Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
   }
+  autoNetworthSnapshot();
   const start = PAGES.includes(pageFromHash()) ? pageFromHash() : 'uebersicht';
   history.replaceState({ page: start }, '', '#' + start);
   navigate(start, { push: false });

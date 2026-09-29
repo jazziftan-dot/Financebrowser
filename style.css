@@ -495,6 +495,21 @@ nav {
 /* ── Transfer Btn Highlight ── */
 .add-btn.transfer-btn { color: var(--primary-light); border-color: rgba(99,102,241,.4); }
 
+/* ── Monats-Navigation & Buchungen ── */
+.month-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.month-label { flex: 1; text-align: center; font-size: 15px; font-weight: 700; }
+.kpi-grid.kpi-grid-3 { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.kpi-grid-3 .kpi-item { padding: 9px 10px; min-width: 0; }
+.kpi-grid-3 .kpi-value { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Anstehende Zahlungen ── */
+.upcoming-row {
+  display: flex; align-items: center; gap: 10px; font-size: 13px;
+  background: var(--surface2); border-radius: 8px; padding: 8px 10px;
+}
+.upcoming-when { font-size: 11px; font-weight: 700; color: var(--primary-light); min-width: 52px; }
+.upcoming-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 /* ── Touch-Geräte: grössere Tippflächen (min. ~40px) ── */
 @media (pointer: coarse) {
   .btn-icon { width: 40px; height: 40px; font-size: 16px; }

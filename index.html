@@ -44,6 +44,21 @@
       <div class="stat-card"><div class="lbl">Frei/Mt.</div><div class="val" id="dash-savings">0</div></div>
     </div>
 
+    <!-- Dieser Monat -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="card-title" style="margin-bottom:0" id="dash-month-title">Dieser Monat</div>
+        <button class="toggle-btn" onclick="openTransactionModal()">+ Buchung</button>
+      </div>
+      <div id="dash-month"></div>
+    </div>
+
+    <!-- Anstehende Zahlungen -->
+    <div class="card">
+      <div class="card-title">📅 Anstehende Zahlungen (14 Tage)</div>
+      <div id="dash-upcoming"></div>
+    </div>
+
     <!-- Notfallfonds -->
     <div class="card">
       <div class="card-title">Notfallfonds</div>
@@ -180,14 +195,21 @@
       <button class="add-btn" onclick="openExpenseModal()">+ Ausgabe hinzufügen</button>
     </div>
 
-    <!-- Einmalige Buchungen -->
+    <!-- Buchungen pro Monat -->
     <div class="section-divider" style="margin-top:20px">
-      <div class="sdiv-title">📒 Einmalige Buchungen</div>
+      <div class="sdiv-title">📒 Buchungen</div>
       <div class="sdiv-line"></div>
     </div>
+    <div class="month-nav">
+      <button class="btn btn-ghost btn-icon" onclick="shiftTxMonth(-1)" aria-label="Vorheriger Monat">◀</button>
+      <div class="month-label" id="tx-month-label"></div>
+      <button class="btn btn-ghost btn-icon" onclick="shiftTxMonth(1)" aria-label="Nächster Monat">▶</button>
+    </div>
+    <div id="tx-month-summary"></div>
+    <div id="tx-category-breakdown"></div>
     <div class="item-list" id="transactions-list"></div>
     <div style="margin-top:8px">
-      <button class="add-btn" onclick="openTransactionModal()">+ Einmalige Buchung</button>
+      <button class="add-btn" onclick="openTransactionModal()">+ Buchung erfassen</button>
     </div>
   </div><!-- /ausgaben -->
 
