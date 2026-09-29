@@ -14,6 +14,7 @@ const DEFAULT_STATE = {
   transactions: [],
   portfolioHistory: [],
   cardPayments: [],
+  contracts: [],
   settings: { inflationRate: 2, fireWithdrawalRate: 4, fireMonthlyExpenses: 0, taxEstimate: null, taxCanton: 'ZH',
               privacy: false, pinHash: null, pinLength: null, lastBackup: 0, backupSnooze: 0,
               // v2: Budgetmonat & Lohn
@@ -23,7 +24,7 @@ const DEFAULT_STATE = {
 };
 
 // Aktuelle Version des Datenmodells. Jede Erhöhung braucht einen Schritt in MIGRATIONS.
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // ── Kontotypen ─────────────────────────────────────────────────────────────
 const ACCOUNT_TYPES = {
@@ -96,7 +97,10 @@ const MIGRATIONS = {
     const map = { checking: 'liquid', savings: 'savings', depot: 'bound', other: 'bound' };
     st.accounts = (st.accounts || []).map(a => ({ ...a, type: map[a.type] || (ACCOUNT_TYPES[a.type] ? a.type : 'liquid') }));
     st.cardPayments = st.cardPayments || [];
-  }
+  },
+  // v3: Verträge (Kündigungsfristen); Belegfotos liegen in IndexedDB, Buchungen erhalten optional
+  //     warrantyUntil + receiptIds
+  3: st => { st.contracts = st.contracts || []; }
 };
 
 function migrateState(raw) {
@@ -383,6 +387,13 @@ const RENDERERS = {};
 // Erweiterungen (liquidity.js, contracts.js, …) hängen sich hier ein
 const PAGE_HOOKS = { uebersicht: [], einkommen: [], ausgaben: [], vermoegen: [], ziele: [], txMonthChanged: [], boot: [] };
 const SETTINGS_SECTIONS = [];   // { title, html(), save() } – erscheinen unter ⚙️
+// Zusatzfelder in Formularen: { html(prefill), mounted?(prefill), read(data, prefill) → false = abbrechen, after?(item) }
+const TX_MODAL_EXTRAS = [];
+const EXPENSE_MODAL_EXTRAS = [];
+const DELETE_HOOKS = [];        // (type, item) nach dem Löschen
+const EXPORT_HOOKS = [];        // async (payload) – Zusatzdaten ins Backup schreiben
+const IMPORT_HOOKS = [];        // async (parsed) – Zusatzdaten aus dem Backup übernehmen
+const DASH_ALERTS = [];         // () → HTML-Schnipsel für Hinweise in der Übersicht
 function renderPage(id) {
   RENDERERS[id]?.();
   PAGE_HOOKS[id]?.forEach(fn => { try { fn(); } catch (err) { console.error(err); } });
@@ -441,6 +452,8 @@ RENDERERS.uebersicht = function() {
 
   renderDashMonth();
   renderBackupHint();
+  const alerts = DASH_ALERTS.map(fn => { try { return fn(); } catch (err) { console.error(err); return ''; } }).join('');
+  el('dash-alerts').innerHTML = alerts;
 
   // Notfallfonds
   const em = emergencyStatus();
@@ -965,7 +978,7 @@ function renderTransactions() {
       <div class="item-left">
         <div class="item-icon" style="background:${colorFor(t.category)}22">${iconFor(t.category)}</div>
         <div>
-          <div class="item-name">${esc(t.name)}${t.fromReserve ? ' <span class="freq-badge">🐷 aus Rückstellung</span>' : ''}</div>
+          <div class="item-name">${esc(t.name)}${t.fromReserve ? ' <span class="freq-badge">🐷 aus Rückstellung</span>' : ''}${t.receiptIds?.length ? ` <span class="receipt-link" onclick="showReceipts('${t.id}')">🧾</span>` : ''}</div>
           <div class="item-sub">${esc(t.category || '–')} · ${fmtDate(t.date)}${acc ? ' · ' + esc(acc) : ''}</div>
         </div>
       </div>
@@ -2118,8 +2131,10 @@ function deleteItem(type, id) {
   const map = { income:'income', expense:'expenses', investment:'investments', debt:'debts', goal:'goals', account:'accounts', transaction:'transactions' };
   const key = map[type];
   if (!key) return;
-  if (type === 'transaction') applyTxToAccount(state.transactions.find(x => x.id === id), -1);
+  const item = state[key].find(x => x.id === id);
+  if (type === 'transaction') applyTxToAccount(item, -1);
   state[key] = state[key].filter(x => x.id !== id);
+  DELETE_HOOKS.forEach(fn => fn(type, item));
   saveState(); toast('Gelöscht'); refreshCurrent();
 }
 
@@ -2412,6 +2427,7 @@ function openExpenseModal(prefill = null) {
       <div class="field"><label>Notiz (optional)</label>
         <input id="m-note" type="text" value="${esc(prefill?.note)}">
       </div>
+      ${EXPENSE_MODAL_EXTRAS.map(x => x.html(prefill)).join('')}
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
         <button class="btn btn-primary" onclick="saveExpense()">Speichern</button>
@@ -2419,6 +2435,7 @@ function openExpenseModal(prefill = null) {
     </div>
   </div>`);
   onExpenseFreqChange();
+  EXPENSE_MODAL_EXTRAS.forEach(x => x.mounted?.(prefill));
 }
 
 function onExpenseFreqChange() {
@@ -2482,11 +2499,12 @@ function saveExpense() {
   // Bei nicht-monatlichen Ausgaben bestimmt das Fälligkeitsdatum den Tag (verhindert "Wandern" beim Weiterschalten)
   const dueDay = irregular ? (f.nextDue ? parseISO(f.nextDue).getDate() : null) : readDueDay('m-due');
   const data = { name, amount, category, budgetLimit, note, dueDay, dueMonth: null, ...f };
-  if (editContext) {
-    Object.assign(state.expenses.find(x => x.id === editContext.id), data);
-  } else {
-    state.expenses.push({ id: uid(), ...data });
-  }
+  const existing = editContext && state.expenses.find(x => x.id === editContext.id);
+  for (const x of EXPENSE_MODAL_EXTRAS) if (x.read(data, existing) === false) return;
+  let item = existing;
+  if (existing) Object.assign(existing, data);
+  else { item = { id: uid(), ...data }; state.expenses.push(item); }
+  EXPENSE_MODAL_EXTRAS.forEach(x => x.after?.(item));
   saveState(); closeModal(); toast('Gespeichert ✓');
   refreshCurrent();
 }
@@ -2543,12 +2561,14 @@ function openTransactionModal(prefill = null) {
       <div class="field"><label>Notiz (optional)</label>
         <input id="m-note" type="text" value="${esc(prefill?.note)}">
       </div>
+      ${TX_MODAL_EXTRAS.map(x => x.html(prefill)).join('')}
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="closeModal()">Abbrechen</button>
         <button class="btn btn-primary" onclick="saveTransaction()">Speichern</button>
       </div>
     </div>
   </div>`);
+  TX_MODAL_EXTRAS.forEach(x => x.mounted?.(prefill));
 }
 
 function saveTransaction() {
@@ -2560,16 +2580,20 @@ function saveTransaction() {
   if (!state.transactions) state.transactions = [];
   const data = { name, type, amount, category, date, note, accountId };
   const existing = editContext?.type === 'transaction' && state.transactions.find(x => x.id === editContext.id);
+  for (const x of TX_MODAL_EXTRAS) if (x.read(data, existing) === false) return;
+  let tx;
   if (existing) {
     applyTxToAccount(existing, -1);
     Object.assign(existing, data);
     applyTxToAccount(existing, +1);
+    tx = existing;
   } else {
-    const tx = { id: uid(), ...data };
+    tx = { id: uid(), ...data };
     state.transactions.push(tx);
     applyTxToAccount(tx, +1);
   }
   txMonth = periodKeyOf(parseISO(date)); // zum Budgetmonat der Buchung springen
+  TX_MODAL_EXTRAS.forEach(x => x.after?.(tx));
   saveState(); closeModal(); toast('Buchung gespeichert ✓');
   refreshCurrent();
 }
@@ -2966,8 +2990,10 @@ function saveSettings() {
   saveState(); closeModal(); toast('Gespeichert ✓'); refreshCurrent();
 }
 
-function exportData() {
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+async function exportData() {
+  const payload = JSON.parse(JSON.stringify(state));
+  for (const hook of EXPORT_HOOKS) { try { await hook(payload); } catch (err) { console.error(err); } }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = `finanzplaner-backup-${localISO()}.json`; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -3131,9 +3157,13 @@ function exportTransactionsCSV() {
 function importData(e) {
   const file = e.target.files?.[0]; if (!file) return;
   const reader = new FileReader();
-  reader.onload = ev => {
-    try { state = migrateState(JSON.parse(ev.target.result)); saveState(); closeModal(); applyPrivacy(); toast('Importiert ✓'); navigate('uebersicht'); }
-    catch { toast('Fehler beim Importieren'); }
+  reader.onload = async ev => {
+    try {
+      const parsed = JSON.parse(ev.target.result);
+      for (const hook of IMPORT_HOOKS) await hook(parsed);
+      state = migrateState(parsed); saveState(); closeModal(); applyPrivacy(); toast('Importiert ✓'); navigate('uebersicht');
+    }
+    catch (err) { console.error(err); toast('Fehler beim Importieren'); }
   };
   reader.readAsText(file);
 }
